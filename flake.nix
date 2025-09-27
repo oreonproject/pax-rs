@@ -50,7 +50,7 @@
               sccache
             ];
             shellHook = ''
-              
+              pax = ./target/debug/pax
             '';
           };
         };
