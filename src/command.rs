@@ -1,5 +1,5 @@
-use std::slice::Iter;
 use std::mem;
+use std::slice::Iter;
 
 use crate::{Flag, StateBox};
 
@@ -102,7 +102,7 @@ impl Command {
         ));
         help
     }
-    // Run the command 
+    // Run the command
     pub fn run(self, mut args: Iter<'_, String>) {
         let mut m_self = self;
         let mut first_arg = true;
@@ -153,16 +153,18 @@ impl Command {
             _ => {
                 // Regular flags
                 for (i, flag) in self.flags.iter().enumerate() {
-
                     if flag.long == l_arg {
-                        let val = if flag.consumer { args.nth(0).cloned() } else { None };
+                        let val = if flag.consumer {
+                            args.nth(0).cloned()
+                        } else {
+                            None
+                        };
 
                         if flag.breakpoint {
                             if opr.is_some() {
                                 panic!("Multiple breakpoint arguments supplied!");
                             }
                             *opr = Some((i, val));
-
                         } else {
                             (flag.run_func)(&mut self.states, val.as_ref())
                         }
@@ -190,10 +192,12 @@ impl Command {
                 }
                 c => {
                     for (i, flag) in self.flags.iter().enumerate() {
-
                         if flag.short == c {
-
-                            let val = if flag.consumer { args.nth(0).cloned() } else { None };
+                            let val = if flag.consumer {
+                                args.nth(0).cloned()
+                            } else {
+                                None
+                            };
 
                             if flag.breakpoint {
                                 if opr.is_some() {
@@ -201,7 +205,6 @@ impl Command {
                                 }
 
                                 *opr = Some((i, val));
-
                             } else {
                                 (flag.run_func)(&mut self.states, val.as_ref())
                             }

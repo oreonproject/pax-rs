@@ -1,6 +1,13 @@
 use std::env;
 
-use pax::{Command, Flag, StateBox, install};
+pub use {command::Command, flag::Flag, statebox::StateBox};
+pub mod command;
+pub mod flag;
+pub mod statebox;
+
+pub mod install;
+
+// use crate::{Command, Flag, StateBox, install};
 
 fn main() {
     // Skip first arg, which is the executable name
@@ -11,7 +18,7 @@ fn main() {
         about: String::from("does nothing"),
         consumer: false,
         breakpoint: false,
-        run_func: | _parent: &mut StateBox, _flag: Option<&String>| {
+        run_func: |_parent: &mut StateBox, _flag: Option<&String>| {
             println!("Did nothing successfully.");
         },
     };
@@ -22,7 +29,7 @@ fn main() {
         about: String::from("consumes the next arg"),
         consumer: true,
         breakpoint: false,
-        run_func: | _parent: &mut StateBox, flag: Option<&String>| {
+        run_func: |_parent: &mut StateBox, flag: Option<&String>| {
             println!("Got flag {flag:?}!");
         },
     };
