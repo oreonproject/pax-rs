@@ -1,6 +1,6 @@
 use std::env;
 
-use paxr::{Command, Flag, StateBox, install};
+use pax::{Command, Flag, StateBox, install};
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();

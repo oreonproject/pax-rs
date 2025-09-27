@@ -14,6 +14,7 @@ pub struct Command {
 }
 
 impl PartialEq for Command {
+    // Define command structure
     fn eq(
         &self,
         Command {
@@ -32,6 +33,7 @@ impl PartialEq for Command {
 }
 
 impl Command {
+    // Create new command
     pub fn new(
         name: &str,
         aliases: Vec<String>,
@@ -53,16 +55,25 @@ impl Command {
         }
     }
     pub fn help(&self) -> String {
+        // Make help message
         let mut help = String::new();
         help.push_str(&format!("{}\n", self.about));
         let mut commands = String::new();
         let mut aliases = String::new();
+
+        // Show possible commands, flags, and aliases
         let mut attrs = String::from(&format!("Usage:\n  {} [flags]\n", self.name));
         let mut flags = String::from("\nFlags:\n");
+
+        // Apply flags to the command
         for flag in &self.flags {
             flags.push_str(&format!("  {}\n", flag.help()));
         }
+
+        // Add the help flag
         flags.push_str(&format!("  -h, --help\thelp for {}\n", self.name));
+
+        // Check if there are subcommands or aliases
         if self.subcommands != Vec::new() {
             attrs.push_str(&format!("  {} [command]\n", self.name));
             commands = String::from("\nAvailable Commands:\n");
