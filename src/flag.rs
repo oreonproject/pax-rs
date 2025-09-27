@@ -10,6 +10,7 @@ pub struct Flag {
 }
 
 impl PartialEq for Flag {
+    // Superfluous PartialEq implementation to allow for struct field equality checks.
     fn eq(
         &self,
         Flag {

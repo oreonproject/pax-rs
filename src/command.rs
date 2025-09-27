@@ -1,5 +1,4 @@
-use std::mem;
-use std::slice::Iter;
+use std::{iter::once, slice::Iter};
 
 use crate::{Flag, StateBox};
 
@@ -14,14 +13,14 @@ pub struct Command {
     pub aliases: Vec<String>,
     pub about: String,
     pub flags: Vec<Flag>,
-    pub subcommands: Vec<Command>,
-    pub states: StateBox,
-    pub run_func: fn(states: &StateBox),
+    pub subcommands: Option<Vec<Command>>,
+    states: StateBox,
+    pub run_func: fn(states: &StateBox, args: Option<&[String]>),
     pub man: String,
 }
 
 impl PartialEq for Command {
-    // Define command structure
+    // Superfluous PartialEq implementation to allow for struct field equality checks.
     fn eq(
         &self,
         Command {
@@ -46,8 +45,8 @@ impl Command {
         aliases: Vec<String>,
         about: &str,
         flags: Vec<Flag>,
-        subcommands: Vec<Command>,
-        run_func: fn(states: &StateBox),
+        subcommands: Option<Vec<Command>>,
+        run_func: fn(states: &StateBox, args: Option<&[String]>),
         man: &str,
     ) -> Self {
         Command {
@@ -81,10 +80,12 @@ impl Command {
         flags.push_str(&format!("  -h, --help\thelp for {}\n", self.name));
 
         // Check if there are subcommands or aliases
-        if self.subcommands != Vec::new() {
+        if let Some(subcommands) = &self.subcommands
+            && *subcommands != Vec::new()
+        {
             attrs.push_str(&format!("  {} [command]\n", self.name));
             commands = String::from("\nAvailable Commands:\n");
-            for command in &self.subcommands {
+            for command in subcommands {
                 commands.push_str(&format!("  {}\t{}\n", command.name, command.man));
             }
         }
@@ -122,10 +123,12 @@ impl Command {
                     HandlerResult::ReturnEarly => return,
                 }
             } else if first_arg {
-                match m_self.try_handle_subcommand(arg, &mut args) {
-                    HandlerResult::ReturnEarly => return,
-                    HandlerResult::ContinueOuter => {}
-                }
+                // match m_self.try_handle_subcommand(arg, &mut args) {
+                //     HandlerResult::ReturnEarly => return,
+                //     HandlerResult::ContinueOuter => {}
+                // }
+                m_self.try_handle_subcommand(arg, &mut args);
+                return;
             }
             first_arg = false;
         }
@@ -134,7 +137,7 @@ impl Command {
             let flag = &m_self.flags[flag_idx];
             (flag.run_func)(&mut m_self.states, val.as_ref())
         } else {
-            (m_self.run_func)(&m_self.states)
+            (m_self.run_func)(&m_self.states, None)
         }
     }
 
@@ -221,26 +224,32 @@ impl Command {
         HandlerResult::ContinueOuter
     }
 
-    fn try_handle_subcommand(&mut self, arg: &str, args: &mut Iter<'_, String>) -> HandlerResult {
-        let subcommands = mem::take(&mut self.subcommands);
-        for command in subcommands {
-            if command.name == arg {
-                command.run(args.clone());
-                return HandlerResult::ReturnEarly;
-            } else {
-                for alias in &command.aliases {
-                    if alias == arg {
-                        command.run(args.clone());
-                        return HandlerResult::ReturnEarly;
+    fn try_handle_subcommand(self, arg: &str, args: &mut Iter<'_, String>) {
+        if let Some(subcommands) = self.subcommands {
+            for command in subcommands {
+                if command.name == arg {
+                    command.run(args.clone());
+                    return;
+                } else {
+                    for alias in &command.aliases {
+                        if alias == arg {
+                            command.run(args.clone());
+                            return;
+                        }
                     }
                 }
             }
+            let error = format!("unknown comand \"{arg}\" for \"{}\"", self.name);
+            println!(
+                "Error: {error}\nRun {} --help for usage.\n{error}",
+                self.name
+            );
+        } else {
+            // Takes the first argument (which was popped from the front of args at the 'outer loop of `run()`) and adds it to the remaining arguments, before calling the main function.
+            let args = once(arg.to_string())
+                .chain(args.cloned())
+                .collect::<Vec<String>>();
+            (self.run_func)(&self.states, Some(&args))
         }
-        let error = format!("unknown comand \"{arg}\" for \"{}\"", self.name);
-        println!(
-            "Error: {error}\nRun {} --help for usage.\n{error}",
-            self.name
-        );
-        HandlerResult::ReturnEarly
     }
 }

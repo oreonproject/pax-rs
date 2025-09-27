@@ -18,7 +18,7 @@ fn main() {
         about: String::from("does nothing"),
         consumer: false,
         breakpoint: false,
-        run_func: |_parent: &mut StateBox, _flag: Option<&String>| {
+        run_func: |_parent, _flag| {
             println!("Did nothing successfully.");
         },
     };
@@ -29,7 +29,7 @@ fn main() {
         about: String::from("consumes the next arg"),
         consumer: true,
         breakpoint: false,
-        run_func: |_parent: &mut StateBox, flag: Option<&String>| {
+        run_func: |_parent, flag| {
             println!("Got flag {flag:?}!");
         },
     };
@@ -39,11 +39,11 @@ fn main() {
         Vec::new(),
         "PAX is the official package manager for the Oreon 11.",
         vec![sample_flag, consumable_flag],
-        vec![install::install()],
-        |states: &StateBox| {
+        Some(vec![install::install()]),
+        |states, _args| {
             println!("Hello, World!\n{}", states.len());
         },
-        "Run 'pax <command> --help' for more information on a command.",
+        "Run 'pax [command] --help' for more information on a command.",
     );
     // Run the command with the provided arguments
     command.run(args.iter());
