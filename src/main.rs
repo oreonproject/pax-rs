@@ -1,8 +1,9 @@
 use std::env;
 
-use paxr::{Command, Flag, StateBox, install};
+use pax::{Command, Flag, StateBox, install};
 
 fn main() {
+    // Skip first arg, which is the executable name
     let args: Vec<String> = env::args().skip(1).collect();
     let sample_flag = Flag {
         short: 's',
@@ -10,36 +11,33 @@ fn main() {
         about: String::from("does nothing"),
         consumer: false,
         breakpoint: false,
-        run_func: sample_work,
+        run_func: | _parent: &mut StateBox, _flag: Option<&String>| {
+            println!("Did nothing successfully.");
+        },
     };
+    // get first arg after -c or --consume
     let consumable_flag = Flag {
         short: 'c',
         long: String::from("consume"),
         about: String::from("consumes the next arg"),
         consumer: true,
         breakpoint: false,
-        run_func: consumable_work,
+        run_func: | _parent: &mut StateBox, flag: Option<&String>| {
+            println!("Got flag {flag:?}!");
+        },
     };
+    // Main command
     let command = Command::new(
         "pax",
         Vec::new(),
         "PAX is the official package manager for the Oreon 11.",
         vec![sample_flag, consumable_flag],
         vec![install::install()],
-        main_work,
-        "There is no manual. 'Go' sucks.",
+        |states: &StateBox| {
+            println!("Hello, World!\n{}", states.len());
+        },
+        "Run 'pax <command> --help' for more information on a command.",
     );
+    // Run the command with the provided arguments
     command.run(args.iter());
-}
-
-fn main_work(states: &StateBox) {
-    println!("Hello, World!\n{}", states.len());
-}
-
-fn sample_work(_parent: &mut StateBox, _flag: Option<&String>) {
-    println!("Did nothing successfully.");
-}
-
-fn consumable_work(_parent: &mut StateBox, flag: Option<&String>) {
-    println!("Got flag {flag:?}!");
 }
