@@ -39,11 +39,11 @@ fn main() {
         Vec::new(),
         "PAX is the official package manager for the Oreon 11.",
         vec![sample_flag, consumable_flag],
-        Some(vec![install::install()]),
+        Some(vec![install::build]),
         |states, _args| {
             println!("Hello, World!\n{}", states.len());
         },
-        "Run 'pax [command] --help' for more information on a command.",
+        &[],
     );
     // Run the command with the provided arguments
     command.run(args.iter());

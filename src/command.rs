@@ -13,10 +13,10 @@ pub struct Command {
     pub aliases: Vec<String>,
     pub about: String,
     pub flags: Vec<Flag>,
-    pub subcommands: Option<Vec<Command>>,
+    pub subcommands: Option<Vec<fn(parents: &[String]) -> Command>>,
     states: StateBox,
     pub run_func: fn(states: &StateBox, args: Option<&[String]>),
-    pub man: String,
+    pub hierarchy: Vec<String>,
 }
 
 impl PartialEq for Command {
@@ -31,7 +31,7 @@ impl PartialEq for Command {
             subcommands: _,
             states: _,
             run_func: _,
-            man: _,
+            hierarchy: _,
         }: &Self,
     ) -> bool {
         false
@@ -45,9 +45,9 @@ impl Command {
         aliases: Vec<String>,
         about: &str,
         flags: Vec<Flag>,
-        subcommands: Option<Vec<Command>>,
+        subcommands: Option<Vec<fn(parents: &[String]) -> Command>>,
         run_func: fn(states: &StateBox, args: Option<&[String]>),
-        man: &str,
+        hierarchy: &[String],
     ) -> Self {
         Command {
             name: name.to_string(),
@@ -57,8 +57,14 @@ impl Command {
             subcommands,
             states: StateBox::new(),
             run_func,
-            man: man.to_string(),
+            hierarchy: hierarchy.to_vec(),
         }
+    }
+    // Returns a hierarchy list of all the parents of the command for the "Run" tip at the bottom of the help command.
+    fn compile_parents(&self) -> Vec<String> {
+        let mut hierarchy = self.hierarchy.clone();
+        hierarchy.push(self.name.clone());
+        hierarchy.to_vec()
     }
     pub fn help(&self) -> String {
         // Make help message
@@ -86,7 +92,8 @@ impl Command {
             attrs.push_str(&format!("  {} [command]\n", self.name));
             commands = String::from("\nAvailable Commands:\n");
             for command in subcommands {
-                commands.push_str(&format!("  {}\t{}\n", command.name, command.man));
+                let command = (command)(&[]);
+                commands.push_str(&format!("  {}\t{}\n", command.name, command.about));
             }
         }
         if self.aliases != Vec::<String>::new() {
@@ -98,8 +105,11 @@ impl Command {
         }
         help.push_str(&format!("{attrs}{commands}{aliases}{flags}\n"));
         help.push_str(&format!(
-            "Use {} [command] --help for more information about a command.",
-            self.name
+            "Use `{} [command] --help` for more information about a command.",
+            self.compile_parents()
+                .iter()
+                .fold(String::new(), |acc, x| format!("{acc} {x}"))
+                .trim()
         ));
         help
     }
@@ -189,6 +199,7 @@ impl Command {
     ) -> HandlerResult {
         'mid: for chr in s_arg.chars() {
             match chr {
+                // Help flag
                 'h' => {
                     println!("{}", self.help());
                     return HandlerResult::ReturnEarly;
@@ -225,8 +236,10 @@ impl Command {
     }
 
     fn try_handle_subcommand(self, arg: &str, args: &mut Iter<'_, String>) {
+        let parents = &self.compile_parents();
         if let Some(subcommands) = self.subcommands {
             for command in subcommands {
+                let command = (command)(parents);
                 if command.name == arg {
                     command.run(args.clone());
                     return;

@@ -1,6 +1,6 @@
 use crate::{Command, StateBox};
 
-pub fn install() -> Command {
+pub fn build(hierarchy: &[String]) -> Command {
     Command::new(
         "install",
         vec![String::from("i")],
@@ -8,7 +8,7 @@ pub fn install() -> Command {
         Vec::new(),
         None,
         install_work,
-        "KEKW",
+        hierarchy,
     )
 }
 
