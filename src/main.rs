@@ -24,7 +24,7 @@ fn main() {
         about: String::from("does nothing"),
         consumer: false,
         breakpoint: false,
-        run_func: |_parent, _flag| {
+        run_func: |_states, _flag| {
             println!("Did nothing successfully.");
         },
     };
@@ -35,22 +35,28 @@ fn main() {
         about: String::from("consumes the next arg"),
         consumer: true,
         breakpoint: false,
-        run_func: |_parent, flag| {
-            println!("Got flag {flag:?}!");
+        run_func: |states, flag| {
+            if let Some(flag) = flag {
+                if states.insert(&flag, "https://oreonproject.org/").is_ok() {
+                    println!("Got flag {flag}!");
+                } else {
+                    println!("WARN: Reused flag {flag}!");
+                }
+            } else {
+                println!("FATAL: Missing flag!");
+            }
         },
     };
     // Main command
-    let command = Command::new(
+    let main_command = Command::new(
         name,
         Vec::new(),
         "PAX is the official package manager for the Oreon 11.",
         vec![sample_flag, consumable_flag],
         Some(vec![install::build]),
-        |states, _args| {
-            println!("Hello, World!\n{}", states.len());
-        },
+        |_command, _args| command::PostAction::GetHelp,
         &[],
     );
     // Run the command with the provided arguments
-    command.run(args);
+    main_command.run(args);
 }

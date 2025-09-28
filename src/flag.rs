@@ -6,7 +6,7 @@ pub struct Flag {
     pub about: String,
     pub consumer: bool,
     pub breakpoint: bool,
-    pub run_func: fn(parent: &mut StateBox, flag: Option<&String>),
+    pub run_func: fn(parent: &mut StateBox, flag: Option<String>),
 }
 
 impl PartialEq for Flag {

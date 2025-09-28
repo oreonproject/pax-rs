@@ -8,6 +8,12 @@ enum HandlerResult {
     ReturnEarly,
 }
 
+// The action to perform once a command has run
+pub enum PostAction {
+    Return,
+    GetHelp,
+}
+
 // Extraction of complex type
 type Subcommand = Option<Vec<fn(parents: &[String]) -> Command>>;
 
@@ -18,7 +24,7 @@ pub struct Command {
     pub flags: Vec<Flag>,
     pub subcommands: Subcommand,
     states: StateBox,
-    pub run_func: fn(states: &StateBox, args: Option<&[String]>),
+    pub run_func: fn(states: &StateBox, args: Option<&[String]>) -> PostAction,
     pub hierarchy: Vec<String>,
 }
 
@@ -49,7 +55,7 @@ impl Command {
         about: &str,
         flags: Vec<Flag>,
         subcommands: Subcommand,
-        run_func: fn(states: &StateBox, args: Option<&[String]>),
+        run_func: fn(states: &StateBox, args: Option<&[String]>) -> PostAction,
         hierarchy: &[String],
     ) -> Self {
         Command {
@@ -138,21 +144,16 @@ impl Command {
                     HandlerResult::ReturnEarly => return,
                 }
             } else if first_arg {
-                // match m_self.try_handle_subcommand(arg, &mut args) {
-                //     HandlerResult::ReturnEarly => return,
-                //     HandlerResult::ContinueOuter => {}
-                // }
                 m_self.try_handle_subcommand(arg, &mut args);
                 return;
             }
             first_arg = false;
         }
-
         if let Some((flag_idx, val)) = opr {
             let flag = &m_self.flags[flag_idx];
-            (flag.run_func)(&mut m_self.states, val.as_ref())
+            (flag.run_func)(&mut m_self.states, val)
         } else {
-            (m_self.run_func)(&m_self.states, None)
+            m_self.handle_post_action((m_self.run_func)(&m_self.states, None));
         }
     }
 
@@ -184,7 +185,7 @@ impl Command {
                             }
                             *opr = Some((i, val));
                         } else {
-                            (flag.run_func)(&mut self.states, val.as_ref())
+                            (flag.run_func)(&mut self.states, val)
                         }
                         return HandlerResult::ContinueOuter;
                     }
@@ -225,7 +226,7 @@ impl Command {
 
                                 *opr = Some((i, val));
                             } else {
-                                (flag.run_func)(&mut self.states, val.as_ref())
+                                (flag.run_func)(&mut self.states, val)
                             }
 
                             continue 'mid;
@@ -267,7 +268,14 @@ impl Command {
             let args = once(arg.to_string())
                 .chain(args.cloned())
                 .collect::<Vec<String>>();
-            (self.run_func)(&self.states, Some(&args))
+            self.handle_post_action((self.run_func)(&self.states, Some(&args)));
+        }
+    }
+
+    fn handle_post_action(&self, action: PostAction) {
+        match action {
+            PostAction::Return => (),
+            PostAction::GetHelp => println!("{}", self.help()),
         }
     }
 }

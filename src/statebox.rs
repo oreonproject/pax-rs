@@ -1,7 +1,8 @@
 use std::{any::Any, collections::HashMap};
 
+#[derive(Debug)]
 pub struct StateBox {
-    store: HashMap<&'static str, Box<dyn Any>>,
+    store: HashMap<String, Box<dyn Any>>,
 }
 
 impl StateBox {
@@ -10,13 +11,13 @@ impl StateBox {
             store: HashMap::new(),
         }
     }
-    pub fn insert<T: 'static>(&mut self, key: &'static str, value: T) -> Result<(), String> {
+    pub fn insert<T: 'static>(&mut self, key: &str, value: T) -> Result<(), String> {
         if self.store.contains_key(key) {
             return Err(String::from(
                 "Key already exists! If you wish to update this value, use `set()` method instead.",
             ));
         }
-        self.store.insert(key, Box::new(value));
+        self.store.insert(key.to_string(), Box::new(value));
         Ok(())
     }
     pub fn remove(&mut self, key: &str) -> Result<(), String> {
@@ -50,11 +51,11 @@ impl StateBox {
             .map(|x| Some(*x))
             .ok()?
     }
-    pub fn shove<T: 'static>(&mut self, key: &'static str, value: T) {
+    pub fn shove<T: 'static>(&mut self, key: &str, value: T) {
         if let Some(state) = self.store.get_mut(key) {
             *state = Box::new(value)
         } else {
-            self.store.insert(key, Box::new(value));
+            self.store.insert(key.to_string(), Box::new(value));
         }
     }
     pub fn yank(&mut self, key: &str) {
