@@ -22,10 +22,7 @@ To make the structure of this repo better for readability, each subcommand will 
 ```
 
 # Pseudo-docs
-A quick glance over this project will reveal how few dependancies it has - namely `core` (builtin), `std` (builtin), and `lib.rs`. `lib.rs` is the 'backend' of the command parser, and holds all the implementation logic for creating commands. There is no real reason why `lib.rs` is used instead of the standard [`clap`](https://crates.io/crates/clap) crate, so `lib.rs` may be swapped out in the future. For now, though, `Command` and `Flag` types will be documented below.
-
-> [!CAUTION]
-> The current implementations load every command and sub-command into RAM all at once. This will hopefully be patched in another branch, so the implementation of `lib.rs` may change slightly in a future Pull Request.
+A quick glance over this project will reveal how few dependancies it has - namely `core` (builtin), `std` (builtin). There is no real reason why `command.rs`,`flag.rs`,and`statebox.rs` are used instead of the standard [`clap`](https://crates.io/crates/clap) crate, so they may be swapped out in the future. For now, though, `Command` and `Flag` types will be documented below.
 
 ## Command
 | Struct Field | Usage |
@@ -34,15 +31,15 @@ A quick glance over this project will reveal how few dependancies it has - namel
 |Aliases|List of alternate names/arguments used to call this command.|
 |About|The information that is displayed at the top of the help message for the command.|
 |Flags|Flags that can be used on the command. See below.|
-|Subcommands|The child commands that can be called from this command.|
+|Subcommands|Constructors of child commands that can be called from this command. Note that this is not a list of `Command`, which reduces the memory usage of the program.|
 |States|Settings that are written to via flags, and then used to alter the execution of the command.|
 |Run_func|The function that is responsible for the logic of the command.|
-|Man|Originally meant for the manual information, but instead is used as a brief description of the command for its parent's help flag. **Will likely be renamed**.|
+|Hierarchy|A list of all the prior `Command`s' names for use in the help command.|
 
 ## Flags
 | Struct Field | Usage |
 |:------------:|-------|
-|Short|The short flag name. **Will be changed from `char` to `Option<char>`**.|
+|Short|The short flag name, if any.|
 |Long|The long flag name.|
 |About|Brief description used for help information.|
 |Consumer|Whether this flag takes in an argument. Follows the guidelines specified [here](https://github.com/DitherDude/browser/wiki/Universal-information#binary-flags).|

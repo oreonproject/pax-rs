@@ -19,7 +19,7 @@ fn main() {
         .unwrap_or(None)
         .unwrap_or("pax");
     let sample_flag = Flag {
-        short: 's',
+        short: Some('s'),
         long: String::from("sample"),
         about: String::from("does nothing"),
         consumer: false,
@@ -30,7 +30,7 @@ fn main() {
     };
     // get first arg after -c or --consume
     let consumable_flag = Flag {
-        short: 'c',
+        short: Some('c'),
         long: String::from("consume"),
         about: String::from("consumes the next arg"),
         consumer: true,

@@ -211,7 +211,7 @@ impl Command {
                 }
                 c => {
                     for (i, flag) in self.flags.iter().enumerate() {
-                        if flag.short == c {
+                        if flag.short == Some(c) {
                             let val = if flag.consumer {
                                 args.next().cloned()
                             } else {

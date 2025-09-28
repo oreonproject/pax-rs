@@ -1,7 +1,7 @@
 use crate::StateBox;
 
 pub struct Flag {
-    pub short: char,
+    pub short: Option<char>,
     pub long: String,
     pub about: String,
     pub consumer: bool,
@@ -29,7 +29,12 @@ impl PartialEq for Flag {
 impl Flag {
     pub fn help(&self) -> String {
         let mut help = String::new();
-        help.push_str(&format!("-{}, --{}\t{}", self.short, self.long, self.about));
+        let short = if let Some(short) = self.short {
+            format!("-{short},")
+        } else {
+            String::from("   ")
+        };
+        help.push_str(&format!("{} --{}\t{}", short, self.long, self.about));
         help
     }
 }
