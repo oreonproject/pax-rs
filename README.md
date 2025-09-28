@@ -22,7 +22,7 @@ To make the structure of this repo better for readability, each subcommand will 
 ```
 
 # Pseudo-docs
-A quick glance over this project will reveal how few dependancies it has - namely `core` (builtin), `std` (builtin), and `lib.rs`. `lib.rs` is the 'backend' of the command parser, and holds all the implementation logic for creating commands. There is no real reason why `lib.rs` is used instead of the standard [`clap`](https://crates.io/crates/clap) crate, so `lib.rs` may be swapped out in the future. For now, though, `Command` and `Flag` types will be documented below.
+A quick glance over this project will reveal how few dependencies it has - namely `core` (builtin), `std` (builtin), and `lib.rs`. `lib.rs` is the 'backend' of the command parser, and holds all the implementation logic for creating commands. There is no real reason why `lib.rs` is used instead of the standard [`clap`](https://crates.io/crates/clap) crate, so `lib.rs` may be swapped out in the future. For now, though, `Command` and `Flag` types will be documented below.
 
 > [!CAUTION]
 > The current implementations load every command and sub-command into RAM all at once. This will hopefully be patched in another branch, so the implementation of `lib.rs` may change slightly in a future Pull Request.
