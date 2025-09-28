@@ -1,4 +1,4 @@
-use std::env;
+use std::{env, path::Path};
 
 pub use {command::Command, flag::Flag, statebox::StateBox};
 pub mod command;
@@ -10,8 +10,14 @@ pub mod install;
 // use crate::{Command, Flag, StateBox, install};
 
 fn main() {
-    // Skip first arg, which is the executable name
-    let args: Vec<String> = env::args().skip(1).collect();
+    let args: Vec<String> = env::args().collect();
+    let mut args = args.iter();
+    let name = args
+        .next()
+        .map(|arg| Path::new(arg).file_name().map(|x| x.to_str()))
+        .unwrap_or(None)
+        .unwrap_or(None)
+        .unwrap_or("pax");
     let sample_flag = Flag {
         short: 's',
         long: String::from("sample"),
@@ -35,7 +41,7 @@ fn main() {
     };
     // Main command
     let command = Command::new(
-        "pax",
+        name,
         Vec::new(),
         "PAX is the official package manager for the Oreon 11.",
         vec![sample_flag, consumable_flag],
@@ -46,5 +52,5 @@ fn main() {
         &[],
     );
     // Run the command with the provided arguments
-    command.run(args.iter());
+    command.run(args);
 }

@@ -8,12 +8,15 @@ enum HandlerResult {
     ReturnEarly,
 }
 
+// Extraction of complex type
+type Subcommand = Option<Vec<fn(parents: &[String]) -> Command>>;
+
 pub struct Command {
     pub name: String,
     pub aliases: Vec<String>,
     pub about: String,
     pub flags: Vec<Flag>,
-    pub subcommands: Option<Vec<fn(parents: &[String]) -> Command>>,
+    pub subcommands: Subcommand,
     states: StateBox,
     pub run_func: fn(states: &StateBox, args: Option<&[String]>),
     pub hierarchy: Vec<String>,
@@ -45,7 +48,7 @@ impl Command {
         aliases: Vec<String>,
         about: &str,
         flags: Vec<Flag>,
-        subcommands: Option<Vec<fn(parents: &[String]) -> Command>>,
+        subcommands: Subcommand,
         run_func: fn(states: &StateBox, args: Option<&[String]>),
         hierarchy: &[String],
     ) -> Self {
@@ -83,7 +86,7 @@ impl Command {
         }
 
         // Add the help flag
-        flags.push_str(&format!("  -h, --help\thelp for {}\n", self.name));
+        flags.push_str(&format!("  -h, --help\thelp for {}", self.name));
 
         // Check if there are subcommands or aliases
         if let Some(subcommands) = &self.subcommands
@@ -103,14 +106,16 @@ impl Command {
             }
             aliases = format!("{}\n", aliases.trim_end_matches(", "));
         }
-        help.push_str(&format!("{attrs}{commands}{aliases}{flags}\n"));
-        help.push_str(&format!(
-            "Use `{} [command] --help` for more information about a command.",
-            self.compile_parents()
-                .iter()
-                .fold(String::new(), |acc, x| format!("{acc} {x}"))
-                .trim()
-        ));
+        help.push_str(&format!("{attrs}{commands}{aliases}{flags}"));
+        if self.subcommands.is_some() {
+            help.push_str(&format!(
+                "\n\nUse `{} [command] --help` for more information about a command.",
+                self.compile_parents()
+                    .iter()
+                    .fold(String::new(), |acc, x| format!("{acc} {x}"))
+                    .trim()
+            ));
+        }
         help
     }
     // Run the command
@@ -121,7 +126,7 @@ impl Command {
         let mut opr: Option<(usize, Option<String>)> = None;
 
         // outer loop over args
-        'outer: while let Some(arg) = args.nth(0) {
+        'outer: while let Some(arg) = args.next() {
             if let Some(l_arg) = arg.strip_prefix("--") {
                 match m_self.handle_long_flag(l_arg, &mut args, &mut opr) {
                     HandlerResult::ContinueOuter => continue 'outer,
@@ -168,7 +173,7 @@ impl Command {
                 for (i, flag) in self.flags.iter().enumerate() {
                     if flag.long == l_arg {
                         let val = if flag.consumer {
-                            args.nth(0).cloned()
+                            args.next().cloned()
                         } else {
                             None
                         };
@@ -208,7 +213,7 @@ impl Command {
                     for (i, flag) in self.flags.iter().enumerate() {
                         if flag.short == c {
                             let val = if flag.consumer {
-                                args.nth(0).cloned()
+                                args.next().cloned()
                             } else {
                                 None
                             };
