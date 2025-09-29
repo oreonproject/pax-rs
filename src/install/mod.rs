@@ -1,4 +1,8 @@
-use std::{fs::File, io::Read, path::PathBuf};
+use std::{
+    fs::File,
+    io::{Read, Write},
+    path::PathBuf,
+};
 
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Runtime;
@@ -33,25 +37,14 @@ fn install_packages(_states: &StateBox, args: Option<&[String]>) -> PostAction {
             return PostAction::Return;
         }
     };
-    for app in args {
-        let metadata = {
-            let mut metadata = None;
-            for source in sources.trim().split('\n') {
-                metadata = runtime.block_on(get_metadata(source, app));
-                if metadata.is_none() {
-                    println!("[Bad]");
-                    continue;
-                }
-            }
-            if let Some(metadata) = metadata {
-                metadata
-            } else {
-                println!("Cannot find specified package {app}!");
-                return PostAction::Return;
-            }
-        };
-        println!("[Ok]\n{metadata:?}");
-    }
+    let metadatas = match runtime.block_on(get_metadatas(&sources, args)) {
+        Ok(data) => data,
+        Err(faulty) => {
+            println!("\rFailed to locate package {faulty}.");
+            return PostAction::Return;
+        }
+    };
+    println!("{metadatas:?}");
     PostAction::Return
 }
 
@@ -64,12 +57,37 @@ fn get_sources() -> Option<String> {
     Some(sources)
 }
 
-async fn get_metadata(source: &str, app: &str) -> Option<MetaData> {
-    let endpoint = format!("{source}/packages/metadata/{app}");
-    print!("GET {endpoint}... ");
-    let body = reqwest::get(endpoint).await.ok()?.text().await.ok()?;
-    println!("YES");
-    serde_json::from_str::<MetaData>(&body).ok()
+async fn get_metadatas(sources: &str, apps: &[String]) -> Result<Vec<MetaData>, String> {
+    print!("Reading metadata (0%)... ");
+    let mut metadatas = Vec::new();
+    let mut children = Vec::new();
+    for app in apps {
+        children.push(get_metadata(sources, app));
+    }
+    let count = children.len();
+    for (i, child) in children.into_iter().enumerate() {
+        print!("\rReading metadata ({}%)... ", i * 100 / count);
+        let _ = std::io::stdout().flush();
+        if let Some(child) = child.into_future().await {
+            metadatas.push(child.0);
+        } else {
+            return Err(apps[i].to_string());
+        }
+    }
+    println!("\rReading metadata (100%)... Done!");
+    Ok(metadatas)
+}
+
+async fn get_metadata(sources: &str, app: &str) -> Option<(MetaData, usize)> {
+    let mut metadata = None;
+    for (i, source) in sources.trim().split('\n').enumerate() {
+        metadata = {
+            let endpoint = format!("{source}/packages/metadata/{app}");
+            let body = reqwest::get(endpoint).await.ok()?.text().await.ok()?;
+            Some((serde_json::from_str::<MetaData>(&body).ok()?, i))
+        };
+    }
+    metadata
 }
 
 // async fn(){}
