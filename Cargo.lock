@@ -85,6 +85,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
+name = "commands"
+version = "0.1.0"
+dependencies = [
+ "flags",
+ "statebox",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -147,6 +155,13 @@ name = "find-msvc-tools"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ced73b1dacfc750a6db6c0a0c3a3853c8b41997e2e2c563dc90804ae6867959"
+
+[[package]]
+name = "flags"
+version = "0.1.0"
+dependencies = [
+ "statebox",
+]
 
 [[package]]
 name = "fnv"
@@ -699,10 +714,13 @@ dependencies = [
 name = "pax"
 version = "0.1.1"
 dependencies = [
+ "commands",
+ "flags",
  "nix",
  "reqwest",
  "serde",
  "serde_json",
+ "statebox",
  "tokio",
 ]
 
@@ -1001,6 +1019,10 @@ name = "stable_deref_trait"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a8f112729512f8e442d81f95a8a7ddf2b7c6b8a1a6f509a95864142b30cab2d3"
+
+[[package]]
+name = "statebox"
+version = "0.1.0"
 
 [[package]]
 name = "subtle"

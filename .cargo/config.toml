@@ -1,0 +1,2 @@
+[alias]
+test-statebox = "test --doc --package statebox"

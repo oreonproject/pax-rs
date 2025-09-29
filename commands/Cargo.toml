@@ -1,0 +1,8 @@
+[package]
+name = "commands"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+flags.workspace = true
+statebox.workspace = true

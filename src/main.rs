@@ -1,9 +1,14 @@
 use std::{env, path::Path};
 
-pub mod command;
-pub mod flag;
-pub mod statebox;
-pub use {command::Command, flag::Flag, statebox::StateBox};
+// pub mod command;
+// pub mod flags;
+// pub mod statebox;
+
+pub use {
+    commands::{Command, PostAction},
+    flags::Flag,
+    statebox::StateBox,
+};
 
 pub mod endpoints_init;
 pub mod install;
@@ -53,7 +58,7 @@ pub fn main() {
         "PAX is the official package manager for the Oreon 11.",
         vec![sample_flag, consumable_flag],
         Some(vec![install::build, endpoints_init::build]),
-        |_command, _args| command::PostAction::GetHelp,
+        |_command, _args| PostAction::GetHelp,
         &[],
     );
     // Run the command with the provided arguments

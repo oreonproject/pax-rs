@@ -4,7 +4,7 @@ use std::{
     path::PathBuf,
 };
 
-use crate::{Command, Flag, StateBox, command::PostAction};
+use crate::{Command, Flag, PostAction, StateBox};
 use nix::unistd;
 use tokio::runtime::Runtime;
 

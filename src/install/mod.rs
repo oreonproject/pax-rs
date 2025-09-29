@@ -7,7 +7,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Runtime;
 
-use crate::{Command, StateBox, command::PostAction};
+use crate::{Command, PostAction, StateBox};
 
 pub fn build(hierarchy: &[String]) -> Command {
     Command::new(
