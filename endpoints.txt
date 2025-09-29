@@ -1,1 +1,1 @@
-pax.local:8080
+http://pax.local:8080
