@@ -22,7 +22,7 @@ To make the structure of this repo better for readability, each subcommand will 
 ```
 
 # Pseudo-docs
-A quick glance over this project will reveal how few dependancies it has - namely `core` (builtin), `std` (builtin). There is no real reason why `command.rs`,`flag.rs`,and`statebox.rs` are used instead of the standard [`clap`](https://crates.io/crates/clap) crate, so they may be swapped out in the future. For now, though, `Command` and `Flag` types will be documented below.
+There is no real reason why `command.rs`,`flag.rs`,and`statebox.rs` are used to manage commands instead of the standard [`clap`](https://crates.io/crates/clap) crate, so they may be swapped out in the future. For now, though, `Command` and `Flag` types will be documented below.
 
 ## Command
 | Struct Field | Usage |

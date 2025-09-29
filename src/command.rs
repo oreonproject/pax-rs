@@ -1,4 +1,4 @@
-use std::{iter::once, slice::Iter};
+use std::{env, io::Write, iter::once, process::Command as RunCommand, slice::Iter};
 
 use crate::{Flag, StateBox};
 
@@ -10,8 +10,10 @@ enum HandlerResult {
 
 // The action to perform once a command has run
 pub enum PostAction {
-    Return,
+    Elevate,
     GetHelp,
+    PullSources,
+    Return,
 }
 
 // Extraction of complex type
@@ -258,7 +260,7 @@ impl Command {
                     }
                 }
             }
-            let error = format!("unknown comand \"{arg}\" for \"{}\"", self.name);
+            let error = format!("unknown command \"{arg}\" for \"{}\"", self.name);
             println!(
                 "Error: {error}\nRun {} --help for usage.\n{error}",
                 self.name
@@ -274,8 +276,72 @@ impl Command {
 
     fn handle_post_action(&self, action: PostAction) {
         match action {
-            PostAction::Return => (),
+            PostAction::Elevate => {
+                println!("The action you attempted to perform requires root privileges.");
+                match choice("Would you like to try perform this action as sudo?", false) {
+                    None => println!("\nFailed to read terminal input!"),
+                    Some(true) => {
+                        println!("Attempting to elevate execution...");
+                        let _ = std::io::stdout().flush();
+                        let mut cmd = RunCommand::new("sudo");
+                        if cmd.args(env::args()).status().is_err() {
+                            println!("Failed to acquire sudo!");
+                        }
+                    }
+                    Some(false) => (),
+                }
+            }
             PostAction::GetHelp => println!("{}", self.help()),
+            PostAction::PullSources => {
+                match choice("Missing sources.txt! Try pull them now?", false) {
+                    None => println!("\nFailed to read terminal input!"),
+                    Some(true) => {
+                        let args = env::args().collect::<Vec<String>>();
+                        let mut args = args.iter();
+                        let program = args.next();
+                        if let Some(program) = program {
+                            let mut cmd = RunCommand::new(program);
+                            if cmd.args(["pax-init", "--force"]).status().is_err() {
+                                println!("Failed to re-execute!");
+                                return;
+                            }
+                            let mut cmd = RunCommand::new(program);
+                            if cmd.args(args).status().is_err() {
+                                println!("Failed to re-execute!");
+                            }
+                        } else {
+                            println!("Failed to locate program!");
+                        }
+                    }
+                    Some(false) => (),
+                }
+            }
+            PostAction::Return => (),
         }
+    }
+}
+
+fn choice(message: &str, default_yes: bool) -> Option<bool> {
+    print!(
+        "{} [{}]: ",
+        message,
+        if default_yes { "Y/n" } else { "y/N" }
+    );
+    let _ = std::io::stdout().flush();
+    let mut input = String::new();
+    if std::io::stdin().read_line(&mut input).is_err() {
+        println!("\nFailed to read terminal input!");
+        return None;
+    }
+    if default_yes {
+        if ["no", "n", "false", "f"].contains(&input.to_lowercase().trim()) {
+            Some(false)
+        } else {
+            Some(true)
+        }
+    } else if ["yes", "y", "true", "t"].contains(&input.to_lowercase().trim()) {
+        Some(true)
+    } else {
+        Some(false)
     }
 }

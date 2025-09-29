@@ -27,6 +27,23 @@ impl PartialEq for Flag {
 }
 
 impl Flag {
+    pub fn new(
+        short: Option<char>,
+        long: &str,
+        about: &str,
+        consumer: bool,
+        breakpoint: bool,
+        run_func: fn(parent: &mut StateBox, flag: Option<String>),
+    ) -> Self {
+        Flag {
+            short,
+            long: long.to_string(),
+            about: about.to_string(),
+            consumer,
+            breakpoint,
+            run_func,
+        }
+    }
     pub fn help(&self) -> String {
         let mut help = String::new();
         let short = if let Some(short) = self.short {
