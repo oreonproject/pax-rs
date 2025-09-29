@@ -57,7 +57,7 @@ fn get_sources() -> Option<String> {
     Some(sources)
 }
 
-async fn get_metadatas(sources: &str, apps: &[String]) -> Result<Vec<MetaData>, String> {
+async fn get_metadatas(sources: &str, apps: &[String]) -> Result<Vec<(MetaData, usize)>, String> {
     print!("Reading metadata (0%)... ");
     let mut metadatas = Vec::new();
     let mut children = Vec::new();
@@ -69,7 +69,7 @@ async fn get_metadatas(sources: &str, apps: &[String]) -> Result<Vec<MetaData>, 
         print!("\rReading metadata ({}%)... ", i * 100 / count);
         let _ = std::io::stdout().flush();
         if let Some(child) = child.into_future().await {
-            metadatas.push(child.0);
+            metadatas.push(child);
         } else {
             return Err(apps[i].to_string());
         }

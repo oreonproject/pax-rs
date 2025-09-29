@@ -45,16 +45,14 @@ To continue anyway, run with flag `\x1B[35m--{LONG_NAME}\x1B[0m`."
         );
     } else {
         println!("Pulling sources...");
-        let _runtime = match Runtime::new() {
+        let runtime = match Runtime::new() {
             Ok(runtime) => runtime,
             Err(_) => {
                 println!("Error creating runtime!");
                 return PostAction::Return;
             }
         };
-        // result web request is commented out to prevent being ratelimited by GitHub during testing.
-        // let result = runtime.block_on(get_sources());
-        let result = Some(String::from("http://pax.local:8080\n"));
+        let result = runtime.block_on(get_sources());
         if write_sources(result).is_none() {
             println!("Failed to save sources! Are you sudo?");
             return PostAction::Return;
@@ -64,7 +62,7 @@ To continue anyway, run with flag `\x1B[35m--{LONG_NAME}\x1B[0m`."
     PostAction::Return
 }
 
-async fn _get_sources() -> Option<String> {
+async fn get_sources() -> Option<String> {
     reqwest::get(
         "https://raw.githubusercontent.com/oreonproject/pax-rs/refs/heads/main/endpoints.txt",
     )
