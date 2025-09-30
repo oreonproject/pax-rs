@@ -1,11 +1,6 @@
-use std::{
-    fs::{DirBuilder, File},
-    io::Write,
-    path::PathBuf,
-};
-
 use crate::{Command, Flag, PostAction, StateBox};
 use nix::unistd;
+use settings::{get_settings, set_settings};
 use tokio::runtime::Runtime;
 
 static LONG_NAME: &str = "force";
@@ -53,11 +48,16 @@ To continue anyway, run with flag `\x1B[35m--{LONG_NAME}\x1B[0m`."
             }
         };
         let result = runtime.block_on(get_sources());
-        if write_sources(result).is_none() {
-            println!("Failed to save sources! Are you sudo?");
-            return PostAction::Return;
+        match write_sources(result) {
+            Ok(()) => {
+                println!("Done!");
+            }
+            Err(e) => {
+                println!("Failed to save sources! Are you sudo?");
+                println!("Reported error: `{e}`");
+                return PostAction::Return;
+            }
         }
-        println!("Done!");
     }
     PostAction::Return
 }
@@ -73,17 +73,13 @@ async fn get_sources() -> Option<String> {
     .ok()
 }
 
-fn write_sources(sources: Option<String>) -> Option<usize> {
-    let mut path = PathBuf::from("/etc/pax.d");
-    if !path.exists() {
-        DirBuilder::new().create(&path).ok()?;
-    }
-    path.push("sources.txt");
-    if path.is_file() || !path.exists() {
-        let mut file = File::create(path).ok()?;
-        let bytes = file.write(sources?.as_bytes()).ok()?;
-        Some(bytes)
-    } else {
-        None
-    }
+fn write_sources(sources: Option<String>) -> Result<(), String> {
+    let mut settings = get_settings()?;
+    settings.sources = sources
+        .unwrap_or_default()
+        .trim()
+        .split('\n')
+        .map(|x| x.to_string())
+        .collect();
+    set_settings(settings)
 }
