@@ -1,5 +1,6 @@
 use std::{collections::HashSet, io::Write, process::Command as RunCommand};
 
+use nix::unistd;
 use serde::{Deserialize, Serialize};
 use settings::get_settings;
 use tokio::runtime::Runtime;
@@ -19,6 +20,10 @@ pub fn build(hierarchy: &[String]) -> Command {
 }
 
 fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
+    let euid = unistd::geteuid();
+    if euid.as_raw() != 0 {
+        return PostAction::Elevate;
+    }
     let args = match args {
         None => return PostAction::Return,
         Some(args) => args,
@@ -75,7 +80,13 @@ fn build_deps(
     priordeps.extend(deps);
     if !diff.is_empty() {
         match build_deps(&diff, sources, runtime, priordeps) {
-            Ok(data) => metadatas.extend(data),
+            Ok(data) => {
+                for processed in data {
+                    if !metadatas.contains(&processed) {
+                        metadatas.push(processed);
+                    }
+                }
+            }
             Err(()) => return Err(()),
         }
     }
