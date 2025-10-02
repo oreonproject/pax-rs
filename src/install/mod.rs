@@ -48,16 +48,16 @@ fn build_deps(
     args: &[String],
     sources: &[String],
     runtime: &Runtime,
-    priordeps: &mut HashSet<String>,
-) -> Result<Vec<MetaData>, ()> {
-    let mut metadatas = match runtime.block_on(get_metadatas(sources, args)) {
+    priordeps: &mut HashSet<ProcessedMetaData>,
+) -> Result<Vec<ProcessedMetaData>, ()> {
+    let mut metadatas = match runtime.block_on(get_metadatas(args, sources)) {
         Ok(data) => data,
         Err(faulty) => {
             println!("\x1B[2K\rFailed to locate package {faulty}.");
             return Err(());
         }
     };
-    let deps_vec = match runtime.block_on(get_deps(&metadatas)) {
+    let deps_vec = match runtime.block_on(get_deps(&metadatas, sources)) {
         Ok(data) => data,
         Err(faulty) => {
             println!("\x1B[2K\rFailed to parse dependency {faulty}!");
@@ -68,9 +68,9 @@ fn build_deps(
     deps.extend(deps_vec);
     let diff = deps
         .difference(priordeps)
-        .collect::<Vec<&String>>()
+        .collect::<Vec<&ProcessedMetaData>>()
         .iter()
-        .map(|x| x.to_string())
+        .map(|x| x.name.clone())
         .collect::<Vec<String>>();
     priordeps.extend(deps);
     if !diff.is_empty() {
@@ -82,12 +82,15 @@ fn build_deps(
     Ok(metadatas)
 }
 
-async fn get_metadatas(sources: &[String], apps: &[String]) -> Result<Vec<MetaData>, String> {
+async fn get_metadatas(
+    apps: &[String],
+    sources: &[String],
+) -> Result<Vec<ProcessedMetaData>, String> {
     print!("\x1B[2K\rReading package lists... 0%");
     let mut metadatas = Vec::new();
     let mut children = Vec::new();
     for app in apps {
-        children.push(get_metadata(sources, app));
+        children.push(get_metadata(app, None, sources));
     }
     let count = children.len();
     for (i, child) in children.into_iter().enumerate() {
@@ -103,23 +106,40 @@ async fn get_metadatas(sources: &[String], apps: &[String]) -> Result<Vec<MetaDa
     Ok(metadatas)
 }
 
-async fn get_metadata(sources: &[String], app: &str) -> Option<MetaData> {
+async fn get_metadata(
+    app: &str,
+    version: Option<&str>,
+    sources: &[String],
+) -> Option<ProcessedMetaData> {
     let mut metadata = None;
     for source in sources {
         metadata = {
-            let endpoint = format!("{source}/packages/metadata/{app}");
+            let endpoint = if let Some(version) = version {
+                format!("{source}/packages/metadata/{app}?v={version}")
+            } else {
+                format!("{source}/packages/metadata/{app}")
+            };
             let body = reqwest::get(endpoint).await.ok()?.text().await.ok()?;
-            Some(serde_json::from_str::<MetaData>(&body).ok()?)
+            if let Ok(raw_pax) = serde_json::from_str::<RawPax>(&body)
+                && let Some(processed) = raw_pax.process()
+            {
+                Some(processed)
+            } else {
+                None
+            }
         };
     }
     metadata
 }
-async fn get_deps(metadatas: &[MetaData]) -> Result<Vec<String>, String> {
+async fn get_deps(
+    metadatas: &[ProcessedMetaData],
+    sources: &[String],
+) -> Result<Vec<ProcessedMetaData>, String> {
     print!("\x1B[2K\rCollecting dependencies... 0%");
     let mut deps = Vec::new();
     let mut children = Vec::new();
     for metadata in metadatas {
-        children.push(get_dep(metadata));
+        children.push(get_dep(metadata, sources));
     }
     let count = children.len();
     for (i, child) in children.into_iter().enumerate() {
@@ -134,40 +154,122 @@ async fn get_deps(metadatas: &[MetaData]) -> Result<Vec<String>, String> {
     Ok(deps)
 }
 
-async fn get_dep(metadata: &MetaData) -> Result<Vec<String>, String> {
+async fn get_dep(
+    metadata: &ProcessedMetaData,
+    sources: &[String],
+) -> Result<Vec<ProcessedMetaData>, String> {
     let mut deps = Vec::new();
     // These are important to the build process, so they need to be installed prior to
     // installing the dependant, so they get pushed lower down the dependency Vec
     // (lower means it will get installed earlier).
     for dep in &metadata.dependencies {
-        if let Ok(Some(status)) = RunCommand::new("which").arg(dep).status().map(|x| x.code()) {
-            if status != 0 {
-                if let Some(i) = deps.iter().position(|x| x == dep) {
-                    deps.remove(i);
-                }
-                deps.push(dep.to_string());
+        if let Some(metadata) = dep.process(sources).await? {
+            if let Some(i) = deps.iter().position(|x| *x == metadata) {
+                deps.remove(i);
             }
-        } else {
-            return Err(dep.to_string());
+            deps.push(metadata);
         }
     }
     // The dependant can still be built without this dependency, so order doesn't matter.
     for dep in &metadata.runtime_dependencies {
-        if let Ok(Some(status)) = RunCommand::new("which").arg(dep).status().map(|x| x.code()) {
-            if status != 0 && !deps.iter().any(|x| x == dep) {
-                deps.push(dep.to_string());
-            }
-        } else {
-            return Err(dep.to_string());
+        if let Some(metadata) = dep.process(sources).await?
+            && !deps.contains(&metadata)
+        {
+            deps.push(metadata);
         }
     }
     Ok(deps)
 }
 
-// async fn(){}
+#[derive(PartialEq, Eq, Debug, Hash)]
+struct ProcessedMetaData {
+    name: String,
+    description: String,
+    version: String,
+    origin: OriginKind,
+    dependencies: Vec<DependKind>,
+    runtime_dependencies: Vec<DependKind>,
+    build: String,
+    install: String,
+    uninstall: String,
+    hash: String,
+}
 
-#[derive(PartialEq, Serialize, Deserialize, Debug)]
-struct MetaData {
+#[derive(PartialEq, Eq, Deserialize, Serialize, Debug, Hash)]
+enum OriginKind {
+    Url(String),
+    Github {
+        user: String,
+        repo: String,
+        commit: String,
+    },
+}
+
+#[derive(PartialEq, Eq, Debug, Hash)]
+enum DependKind {
+    Latest(String),
+    Specific { name: String, version: String },
+    Volatile(String),
+}
+
+impl DependKind {
+    pub async fn process(&self, sources: &[String]) -> Result<Option<ProcessedMetaData>, String> {
+        match self {
+            DependKind::Latest(latest) => {
+                if let Some(data) = get_metadata(latest, None, sources).await {
+                    Ok(Some(data))
+                } else {
+                    Err(latest.to_string())
+                }
+            }
+            DependKind::Specific { name, version } => {
+                if let Some(data) = get_metadata(name, Some(version), sources).await {
+                    Ok(Some(data))
+                } else {
+                    Err(name.to_string())
+                }
+            }
+            DependKind::Volatile(volatile) => {
+                if let Ok(Some(status)) = RunCommand::new("which").status().map(|x| x.code()) {
+                    if status != 0 {
+                        Ok(None)
+                    } else if let Some(data) = get_metadata(volatile, None, sources).await {
+                        Ok(Some(data))
+                    } else {
+                        Err(volatile.to_string())
+                    }
+                } else {
+                    Err(volatile.to_string())
+                }
+            }
+        }
+    }
+}
+
+#[derive(PartialEq, Deserialize, Serialize, Debug)]
+
+struct _InstalledMetaData {
+    installed: Vec<_InstalledVersion>,
+}
+
+#[derive(PartialEq, Deserialize, Serialize, Debug)]
+struct _InstalledVersion {
+    version: String,
+    origin: OriginKind,
+    dependencies: Vec<_InstalledDepend>,
+    dependents: Vec<String>,
+    uninstall: String,
+    hash: String,
+}
+
+#[derive(PartialEq, Deserialize, Serialize, Debug)]
+struct _InstalledDepend {
+    name: String,
+    version: Option<String>,
+}
+
+#[derive(PartialEq, Deserialize, Debug)]
+struct RawPax {
     name: String,
     description: String,
     version: String,
@@ -178,4 +280,79 @@ struct MetaData {
     install: String,
     uninstall: String,
     hash: String,
+}
+
+impl RawPax {
+    pub fn process(self) -> Option<ProcessedMetaData> {
+        let origin = if self.origin.starts_with("gh/") {
+            let split = self
+                .origin
+                .split('/')
+                .skip(1)
+                .map(|x| x.to_string())
+                .collect::<Vec<String>>();
+            if split.len() == 3 {
+                OriginKind::Github {
+                    user: split[0].clone(),
+                    repo: split[1].clone(),
+                    commit: split[2].clone(),
+                }
+            } else {
+                return None;
+            }
+        // } else if self.origin.starts_with("https://") {
+        //     OriginKind::Url(self.origin.clone())
+        // } else {
+        //     return None;
+        // };
+        } else {
+            OriginKind::Url(self.origin.clone())
+        };
+        let dependencies = {
+            let mut deps = Vec::new();
+            for dep in &self.dependencies {
+                let val = if let Some(dep) = dep.strip_prefix('!') {
+                    DependKind::Volatile(dep.to_string())
+                } else if let Some((name, ver)) = dep.split_once(':') {
+                    DependKind::Specific {
+                        name: name.to_string(),
+                        version: ver.to_string(),
+                    }
+                } else {
+                    DependKind::Latest(dep.to_string())
+                };
+                deps.push(val);
+            }
+            deps
+        };
+        let runtime_dependencies = {
+            let mut deps = Vec::new();
+            for dep in &self.runtime_dependencies {
+                let val = if let Some(dep) = dep.strip_prefix('!') {
+                    DependKind::Volatile(dep.to_string())
+                } else if let Some((name, ver)) = dep.split_once(':') {
+                    DependKind::Specific {
+                        name: name.to_string(),
+                        version: ver.to_string(),
+                    }
+                } else {
+                    DependKind::Latest(dep.to_string())
+                };
+                deps.push(val);
+            }
+            deps
+        };
+        Some(ProcessedMetaData {
+            name: self.name,
+            description: self.description,
+            version: self.version,
+            origin,
+            dependencies,
+            runtime_dependencies,
+            build: self.build,
+            install: self.install,
+            uninstall: self.uninstall,
+            hash: self.hash,
+        })
+    }
 }

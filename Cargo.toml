@@ -24,6 +24,10 @@ reqwest = "0.12.23"
 settings.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_norway.workspace = true
 statebox.workspace = true
 tokio = { version = "1.47.1", features = ["rt-multi-thread"] }
 zstd = "0.13.3"
+
+# [env]
+# You can find some static variables in .cargo/config.toml

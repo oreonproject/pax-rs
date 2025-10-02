@@ -732,6 +732,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "serde_norway",
  "settings",
  "statebox",
  "tokio",

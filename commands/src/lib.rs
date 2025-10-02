@@ -181,7 +181,6 @@ impl Command {
                         } else {
                             None
                         };
-
                         if flag.breakpoint {
                             if opr.is_some() {
                                 panic!("Multiple breakpoint arguments supplied!");
@@ -221,17 +220,14 @@ impl Command {
                             } else {
                                 None
                             };
-
                             if flag.breakpoint {
                                 if opr.is_some() {
                                     panic!("Multiple breakpoint arguments supplied!");
                                 }
-
                                 *opr = Some((i, val));
                             } else {
                                 (flag.run_func)(&mut self.states, val)
                             }
-
                             continue 'mid;
                         }
                     }
@@ -294,7 +290,7 @@ impl Command {
             }
             PostAction::GetHelp => println!("{}", self.help()),
             PostAction::PullSources => {
-                match choice("Missing sources.txt! Try pull them now?", false) {
+                match choice("\x1B[2K\rMissing sources.txt! Try pull them now?", false) {
                     None => println!("\nFailed to read terminal input!"),
                     Some(true) => {
                         let args = env::args().collect::<Vec<String>>();
