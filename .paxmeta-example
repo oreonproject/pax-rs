@@ -1,0 +1,29 @@
+{
+  "name": "example-package",
+  "version": "1.0.0",
+  "description": "Example package showing the simplified .paxmeta format",
+  "source": "https://example.com/releases/example-1.0.0.tar.gz",
+  "dependencies": ["libc>=2.31", "libssl>=1.1"],
+  "provides": ["example", "example-bin"],
+  "build": "./configure --prefix=/usr && make -j$(nproc) && make install DESTDIR=$PAX_BUILD_ROOT",
+  "install": "ldconfig && update-desktop-database",
+  "uninstall": "ldconfig"
+}
+
+# NOTES:
+# - All fields except name, version, description, and source are OPTIONAL
+# - If "hash" is omitted, PAX auto-generates and stores it
+# - If "build" is omitted, PAX uses default autotools: ./configure && make && make install
+# - If "dependencies" is omitted, defaults to []
+# - If "provides" is omitted, defaults to [name]
+# - If "install" is omitted, no post-install hook runs
+# - If "uninstall" is omitted, no post-uninstall hook runs
+#
+# MINIMAL EXAMPLE (autotools package):
+# {
+#   "name": "htop",
+#   "version": "3.2.1",
+#   "description": "Interactive process viewer",
+#   "source": "https://github.com/htop-dev/htop/releases/download/3.2.1/htop-3.2.1.tar.xz"
+# }
+
