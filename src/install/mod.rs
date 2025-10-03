@@ -52,7 +52,7 @@ fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
         for package in packages {
             match &package.kind {
                 MetaDataKind::Pax => {
-                    if let Err(message) = install_pax(&package) {
+                    if let Err(message) = package.install_package() {
                         println!(
                             "Error installing package {}!\nReported error: `{message}`",
                             package.name
@@ -245,9 +245,38 @@ impl ProcessedMetaData {
             hash: self.hash.to_string(),
         }
     }
+    pub fn install_package(&self) -> Result<(), String> {
+        let kind = self.kind.clone();
+        let name = self.name.to_string();
+        let (path, loaded_data) = check_type_conflicts(&name, &kind)?;
+        let metadata = self.to_installed();
+        let mut loaded_data = if let Some(data) = loaded_data {
+            data
+        } else {
+            InstalledMetaData {
+                name: name.clone(),
+                kind,
+                installed: Vec::new(),
+            }
+        };
+        let deps = metadata.dependencies.clone();
+        let ver = metadata.version.to_string();
+        if !loaded_data
+            .installed
+            .iter()
+            .any(|x| x.version == metadata.version)
+        {
+            loaded_data.installed.push(metadata);
+        }
+        loaded_data.write(&path)?;
+        for dep in deps {
+            dep.write_dependent(&name, &ver)?;
+        }
+        Ok(())
+    }
 }
 
-#[derive(PartialEq, Eq, Serialize, Deserialize, Debug, Hash)]
+#[derive(PartialEq, Eq, Serialize, Deserialize, Debug, Hash, Clone)]
 enum MetaDataKind {
     Pax,
 }
@@ -327,11 +356,11 @@ impl DependKind {
             let data = if let Ok(mut file) = File::open(&path) {
                 let mut metadata = String::new();
                 if file.read_to_string(&mut metadata).is_err() {
-                    return Err(format!("Failed to read dependency {name}'s config!"));
+                    return Err(format!("Failed to read dependency `{name}`'s config!"));
                 }
                 let mut data = match serde_norway::from_str::<InstalledMetaData>(&metadata) {
                     Ok(data) => data,
-                    Err(_) => return Err(format!("Failed to parse dependency {name}'s data!")),
+                    Err(_) => return Err(format!("Failed to parse dependency `{name}`'s data!")),
                 };
                 if let Some(ver) = ver {
                     if let Some(bit) = data.installed.iter_mut().find(|x| x.version == *ver) {
@@ -340,7 +369,7 @@ impl DependKind {
                             version: theirver.to_string(),
                         });
                     } else {
-                        return Err(format!("{name} didn't contain version {ver}!"));
+                        return Err(format!("`{name}` didn't contain version {ver}!"));
                     }
                 } else {
                     data.installed.sort_by_key(|x| x.version.clone());
@@ -350,18 +379,18 @@ impl DependKind {
                             version: theirver.to_string(),
                         });
                     } else {
-                        return Err(format!("{name} contained no versions!"));
+                        return Err(format!("`{name}` contained no versions!"));
                     }
                 }
                 data
             } else {
-                return Err(format!("Failed to read dependency {name}'s metadata!"));
+                return Err(format!("Failed to read dependency `{name}`'s metadata!"));
             };
             let mut file = match File::create(&path) {
                 Ok(file) => file,
                 Err(_) => {
                     return Err(format!(
-                        "Failed to open dependency {name}'s metadata as WO!"
+                        "Failed to open dependency `{name}`'s metadata as WO!"
                     ));
                 }
             };
@@ -369,36 +398,62 @@ impl DependKind {
                 Ok(data) => data,
                 Err(_) => {
                     return Err(format!(
-                        "Failed to parse dependency {name}'s metadata to string!"
+                        "Failed to parse dependency `{name}`'s metadata to string!"
                     ));
                 }
             };
             match file.write_all(data.as_bytes()) {
                 Ok(_) => Ok(()),
                 Err(_) => Err(format!(
-                    "Failed to write to dependency {name}'s metadata file!"
+                    "Failed to write to dependency `{name}`'s metadata file!"
                 )),
             }
         } else {
-            Err(format!("Cannot find data for dependency {name}!"))
+            Err(format!("Cannot find data for dependency `{name}`!"))
         }
+    }
+    pub fn _remove(&self, kind: &str) -> Result<(), String> {
+        let (name, version) = match &self {
+            DependKind::Latest(latest) => (latest.to_string(), None),
+            DependKind::Specific { name, version: ver } => {
+                (name.to_string(), Some(ver.to_string()))
+            }
+            DependKind::Volatile(_) => return Ok(()),
+        };
+        let mut path = get_metadata_dir()?;
+        path.push(format!("{name}.yaml"));
+        let mut data = if path.is_file() {
+            if let Ok(mut file) = File::open(&path) {
+                let mut metadata = String::new();
+                if file.read_to_string(&mut metadata).is_err() {
+                    return Err(format!("Failed to read {kind} `{name}`'s config!"));
+                }
+                match serde_norway::from_str::<InstalledMetaData>(&metadata) {
+                    Ok(data) => data,
+                    Err(_) => {
+                        return Err(format!("Failed to parse {kind} `{name}`'s data!"));
+                    }
+                }
+            } else {
+                return Err(format!("Failed to read {kind} `{name}`'s metadata!"));
+            }
+        } else {
+            return Err(format!("Failed to locate {kind} `{name}`'s metadata!"));
+        };
+        data._remove_package(version.as_ref())
     }
 }
 
 #[derive(PartialEq, Deserialize, Serialize, Debug)]
 
 struct InstalledMetaData {
+    name: String,
     kind: MetaDataKind,
     installed: Vec<InstalledVersion>,
 }
 
 impl InstalledMetaData {
     pub fn write(&self, path: &Path) -> Result<(), String> {
-        // if !path.exists() {
-        //     if File::create_new(&path).is_err() {
-        //         return Err(String::from("Failed to create file!"));
-        //     }
-        // }
         if !path.exists() || path.is_file() {
             let data = match serde_norway::to_string(self) {
                 Ok(data) => data,
@@ -418,6 +473,69 @@ impl InstalledMetaData {
             }
         } else {
             Err(String::from("File is of unexpected type!"))
+        }
+    }
+    pub fn _remove_package(&mut self, version: Option<&String>) -> Result<(), String> {
+        let kind = self.kind.clone();
+        let name = self.name.to_string();
+        let (path, loaded_data) = check_type_conflicts(&name, &kind)?;
+        let mut loaded_data = match loaded_data {
+            Some(data) => data,
+            None => return Err(format!("Package {name} is not installed!")),
+        };
+        let (metadata, version) = if let Some(version) = version {
+            match self.installed.iter().find(|x| x.version == *version) {
+                Some(metadata) => (metadata, version.to_string()),
+                None => {
+                    return Err(format!(
+                        "Failed to locate version {version} for package`{name}`."
+                    ));
+                }
+            }
+        } else {
+            let installed = &mut self.installed;
+            installed.sort_by_key(|x| x.version.clone());
+            match installed.first() {
+                Some(metadata) => (metadata, metadata.version.clone()),
+                None => return Err(format!("Failed to locate package `{name}`.")),
+            }
+        };
+        if metadata.dependent {
+            for dependent in &metadata.dependents {
+                dependent._remove("dependent")?
+            }
+            Ok(())
+        } else {
+            for dependency in &metadata.dependencies {
+                dependency._remove("dependency")?
+            }
+            if let Some(index) = loaded_data
+                .installed
+                .iter()
+                .position(|x| x.version == version)
+            {
+                loaded_data.installed.remove(index);
+            };
+            if !loaded_data.installed.is_empty() {
+                let mut file = match File::open(&path) {
+                    Ok(file) => file,
+                    Err(_) => return Err(format!("Failed to read `{name}`'s metadata!")),
+                };
+                let data = match serde_norway::to_string(&loaded_data) {
+                    Ok(data) => data,
+                    Err(_) => {
+                        return Err(format!("Failed to parse `{name}`'s metadata into string!"));
+                    }
+                };
+                match file.write_all(data.as_bytes()) {
+                    Ok(_) => Ok(()),
+                    Err(_) => Err(format!("Failed to write to `{name}`'s file!")),
+                }
+            } else if std::fs::remove_file(&path).is_err() {
+                Err(format!("Failed to remove `{name}`'s metadata file!"))
+            } else {
+                Ok(())
+            }
         }
     }
 }
@@ -530,37 +648,6 @@ impl RawPax {
     }
 }
 
-fn install_pax(metadata: &ProcessedMetaData) -> Result<(), String> {
-    let name = metadata.name.to_string();
-    let (path, loaded_data) = check_type_conflicts(&metadata.name, &metadata.kind)?;
-    let metadata = metadata.to_installed();
-    let mut loaded_data = if let Some(data) = loaded_data {
-        data
-    } else {
-        InstalledMetaData {
-            kind: MetaDataKind::Pax,
-            installed: Vec::new(),
-        }
-    };
-    let deps = metadata.dependencies.clone();
-    // let dependent = metadata.dependent;
-    let ver = metadata.version.to_string();
-    if !loaded_data
-        .installed
-        .iter()
-        .any(|x| x.version == metadata.version)
-    {
-        loaded_data.installed.push(metadata);
-    }
-    loaded_data.write(&path)?;
-    // if dependent {
-    for dep in deps {
-        dep.write_dependent(&name, &ver)?;
-    }
-    // }
-    Ok(())
-}
-
 fn check_type_conflicts(
     name: &str,
     kind: &MetaDataKind,
@@ -573,7 +660,7 @@ fn check_type_conflicts(
         if let Ok(mut file) = File::open(&path) {
             let mut metadata = String::new();
             if file.read_to_string(&mut metadata).is_err() {
-                return Err(format!("Failed to read {name}'s config!"));
+                return Err(format!("Failed to read `{name}`'s config!"));
             }
             let data = match serde_norway::from_str::<InstalledMetaData>(&metadata) {
                 Ok(data) => data,
@@ -588,9 +675,9 @@ fn check_type_conflicts(
                 Ok((path, Some(data)))
             }
         } else {
-            Err(format!("Failed to read {name}'s metadata!"))
+            Err(format!("Failed to read `{name}`'s metadata!"))
         }
     } else {
-        Err(format!("{name}'s metadata file is of unexpected type!"))
+        Err(format!("`{name}`'s metadata file is of unexpected type!"))
     }
 }
