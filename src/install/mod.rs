@@ -1,4 +1,4 @@
-use metadata::{MetaDataKind, ProcessedMetaData, get_metadata};
+use metadata::{MetaDataKind, ProcessedMetaData, PseudoProcessed, get_metadata};
 use nix::unistd;
 use settings::get_settings;
 use std::{collections::HashSet, io::Write};
@@ -162,19 +162,19 @@ async fn get_dep(
     // installing the dependant, so they get pushed lower down the dependency Vec
     // (lower means it will get installed earlier).
     for dep in &metadata.dependencies {
-        if let Ok(Some(metadata)) = dep.to_processed(sources).await? {
-            if let Some(i) = deps.iter().position(|x| *x == metadata) {
+        if let PseudoProcessed::MetaData(metadata) = dep.to_processed(sources).await? {
+            if let Some(i) = deps.iter().position(|x| *x == *metadata) {
                 deps.remove(i);
             }
-            deps.push(metadata);
+            deps.push(*metadata);
         }
     }
     // The dependant can still be built without this dependency, so order doesn't matter.
     for dep in &metadata.runtime_dependencies {
-        if let Ok(Some(metadata)) = dep.to_processed(sources).await?
+        if let PseudoProcessed::MetaData(metadata) = dep.to_processed(sources).await?
             && !deps.contains(&metadata)
         {
-            deps.push(metadata);
+            deps.push(*metadata);
         }
     }
     Ok(deps)

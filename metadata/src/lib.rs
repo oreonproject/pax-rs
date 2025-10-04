@@ -39,16 +39,15 @@ impl ProcessedMetaData {
                 }
                 for child in children {
                     if let Ok(child) = child.into_future().await {
-                        if let Ok(Some(child)) = child {
-                            dependencies.push(Specific {
-                                name: child.name,
-                                version: child.version,
-                            });
-                        } else if let Err((child, name)) = child {
-                            dependencies.push(Specific {
-                                name,
-                                version: child.version,
-                            });
+                        match child {
+                            PseudoProcessed::MetaData(data) => {
+                                dependencies.push(Specific {
+                                    name: data.name,
+                                    version: data.version,
+                                });
+                            }
+                            PseudoProcessed::Specific(specific) => dependencies.push(specific),
+                            PseudoProcessed::Volatile => (),
                         }
                     }
                 }
@@ -140,6 +139,12 @@ pub async fn get_metadata(
     metadata
 }
 
+#[derive(PartialEq, Eq, Debug)]
+pub enum PseudoProcessed {
+    MetaData(Box<ProcessedMetaData>),
+    Specific(Specific),
+    Volatile,
+}
 #[derive(PartialEq, Eq, Serialize, Deserialize, Debug, Hash, Clone)]
 pub enum DependKind {
     Latest(String),
@@ -148,62 +153,7 @@ pub enum DependKind {
 }
 
 impl DependKind {
-    // pub async fn to_specific(
-    //     self,
-    //     sources: &[String],
-    //     dependent: bool,
-    // ) -> Result<Option<ProcessedMetaData>, String> {
-    //     match self {
-    //         DependKind::Latest(latest) => {
-    //             if let Some(data) = get_metadata(&latest, None, sources, dependent).await {
-    //                 let mut path = get_metadata_dir()?;
-    //                 path.push(format!("{}.yaml", &data.name));
-    //                 if let Ok(mut file) = File::open(&path) {
-    //                     let mut metadata = String::new();
-    //                     if file.read_to_string(&mut metadata).is_ok()
-    //                         && let Ok(mut subdata) =
-    //                             serde_norway::from_str::<InstalledMetaData>(&metadata)
-    //                     {
-    //                         subdata.installed.sort_by_key(|x| {
-    //                             Version::parse(&x.version).unwrap_or(Version::new(0, 0, 0))
-    //                         });
-    //                         if let Some(sub_latest) = subdata.installed.last()
-    //                             && Version::parse(&sub_latest.version)
-    //                                 .unwrap_or(Version::new(0, 0, 0))
-    //                                 >= Version::parse(&data.version)
-    //                                     .unwrap_or(Version::new(0, 0, 0))
-    //                         {
-    //                             return Ok(None);
-    //                         }
-    //                     }
-    //                 }
-    //                 Ok(Some(data))
-    //             } else {
-    //                 Err(latest.to_string())
-    //             }
-    //         }
-    //         DependKind::Specific(specific) => Ok(Some(specific)),
-    //         DependKind::Volatile(volatile) => {
-    //             if let Ok(Some(status)) = RunCommand::new("which").status().map(|x| x.code()) {
-    //                 if status != 0 {
-    //                     Ok(None)
-    //                 } else if let Some(data) =
-    //                     get_metadata(&volatile, None, sources, dependent).await
-    //                 {
-    //                     Ok(Some(data))
-    //                 } else {
-    //                     Err(volatile.to_string())
-    //                 }
-    //             } else {
-    //                 Err(volatile.to_string())
-    //             }
-    //         }
-    //     }
-    // }
-    pub async fn to_processed(
-        &self,
-        sources: &[String],
-    ) -> Result<Result<Option<ProcessedMetaData>, (InstalledVersion, String)>, String> {
+    pub async fn to_processed(&self, sources: &[String]) -> Result<PseudoProcessed, String> {
         match self {
             DependKind::Latest(latest) => {
                 if let Some(data) = get_metadata(latest, None, sources, true).await {
@@ -224,18 +174,21 @@ impl DependKind {
                                     >= Version::parse(&data.version)
                                         .unwrap_or(Version::new(0, 0, 0))
                             {
-                                return Ok(Err((sub_latest.clone(), data.name)));
+                                return Ok(PseudoProcessed::Specific(Specific {
+                                    name: data.name,
+                                    version: sub_latest.version.to_string(),
+                                }));
                             }
                         }
                     }
-                    Ok(Ok(Some(data)))
+                    Ok(PseudoProcessed::MetaData(Box::new(data)))
                 } else {
                     Err(latest.to_string())
                 }
             }
             DependKind::Specific(Specific { name, version }) => {
                 if let Some(data) = get_metadata(name, Some(version), sources, true).await {
-                    Ok(Ok(Some(data)))
+                    Ok(PseudoProcessed::MetaData(Box::new(data)))
                 } else {
                     Err(name.to_string())
                 }
@@ -243,9 +196,9 @@ impl DependKind {
             DependKind::Volatile(volatile) => {
                 if let Ok(Some(status)) = RunCommand::new("which").status().map(|x| x.code()) {
                     if status != 0 {
-                        Ok(Ok(None))
+                        Ok(PseudoProcessed::Volatile)
                     } else if let Some(data) = get_metadata(volatile, None, sources, true).await {
-                        Ok(Ok(Some(data)))
+                        Ok(PseudoProcessed::MetaData(Box::new(data)))
                     } else {
                         Err(volatile.to_string())
                     }
@@ -264,7 +217,6 @@ pub struct Specific {
 }
 
 impl Specific {
-    // pub fn get_latest(kind: )
     pub fn write_dependent(&self, their_name: &str, their_ver: &str) -> Result<(), String> {
         let mut path = get_metadata_dir()?;
         path.push(format!("{}.yaml", self.name));
@@ -477,12 +429,6 @@ pub struct InstalledVersion {
     pub uninstall: String,
     pub hash: String,
 }
-
-// #[derive(PartialEq, Deserialize, Serialize, Debug)]
-// struct InstalledDepend {
-//     name: String,
-//     version: Option<String>,
-// }
 
 #[derive(PartialEq, Deserialize, Debug)]
 struct RawPax {
