@@ -52,7 +52,7 @@ pub fn main() {
     let main_command = Command::new(
         name,
         Vec::new(),
-        "PAX is the official package manager for the Oreon 11.",
+        "PAX is the official package manager for Oreon 11.",
         vec![sample_flag, consumable_flag],
         Some(vec![install::build, endpoints_init::build]),
         |_command, _args| PostAction::GetHelp,
