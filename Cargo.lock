@@ -607,6 +607,7 @@ dependencies = [
  "serde_json",
  "serde_norway",
  "settings",
+ "tokio",
 ]
 
 [[package]]

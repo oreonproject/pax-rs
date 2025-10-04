@@ -45,11 +45,9 @@ fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
         for package in packages {
             match &package.kind {
                 MetaDataKind::Pax => {
-                    if let Err(message) = package.install_package() {
-                        println!(
-                            "Error installing package {}!\nReported error: `{message}`",
-                            package.name
-                        );
+                    let name = package.name.to_string();
+                    if let Err(message) = package.install_package(&sources, &runtime) {
+                        println!("Error installing package {name}!\nReported error: `{message}`",);
                         return PostAction::Return;
                     }
                 }
@@ -73,7 +71,7 @@ fn build_deps(
             return Err(());
         }
     };
-    let deps_vec = match runtime.block_on(get_deps(&metadatas, sources, true)) {
+    let deps_vec = match runtime.block_on(get_deps(&metadatas, sources)) {
         Ok(data) => data,
         Err(faulty) => {
             println!("\x1B[2K\rFailed to parse dependency {faulty}!");
@@ -135,13 +133,12 @@ async fn get_metadatas(
 async fn get_deps(
     metadatas: &[ProcessedMetaData],
     sources: &[String],
-    dependent: bool,
 ) -> Result<Vec<ProcessedMetaData>, String> {
     print!("\x1B[2K\rCollecting dependencies... 0%");
     let mut deps = Vec::new();
     let mut children = Vec::new();
     for metadata in metadatas {
-        children.push(get_dep(metadata, sources, dependent));
+        children.push(get_dep(metadata, sources));
     }
     let count = children.len();
     for (i, child) in children.into_iter().enumerate() {
@@ -159,14 +156,13 @@ async fn get_deps(
 async fn get_dep(
     metadata: &ProcessedMetaData,
     sources: &[String],
-    dependent: bool,
 ) -> Result<Vec<ProcessedMetaData>, String> {
     let mut deps = Vec::new();
     // These are important to the build process, so they need to be installed prior to
     // installing the dependant, so they get pushed lower down the dependency Vec
     // (lower means it will get installed earlier).
     for dep in &metadata.dependencies {
-        if let Some(metadata) = dep.process(sources, dependent).await? {
+        if let Ok(Some(metadata)) = dep.to_processed(sources).await? {
             if let Some(i) = deps.iter().position(|x| *x == metadata) {
                 deps.remove(i);
             }
@@ -175,7 +171,7 @@ async fn get_dep(
     }
     // The dependant can still be built without this dependency, so order doesn't matter.
     for dep in &metadata.runtime_dependencies {
-        if let Some(metadata) = dep.process(sources, dependent).await?
+        if let Ok(Some(metadata)) = dep.to_processed(sources).await?
             && !deps.contains(&metadata)
         {
             deps.push(metadata);
