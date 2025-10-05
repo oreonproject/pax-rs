@@ -1,7 +1,7 @@
 use crate::{Command, Flag, PostAction, StateBox};
-use nix::unistd;
 use settings::{get_settings, set_settings};
 use tokio::runtime::Runtime;
+use utils::is_root;
 
 static LONG_NAME: &str = "force";
 
@@ -28,8 +28,7 @@ pub fn build(hierarchy: &[String]) -> Command {
 }
 
 fn get_endpoints(states: &StateBox, _args: Option<&[String]>) -> PostAction {
-    let euid = unistd::geteuid();
-    if euid.as_raw() != 0 {
+    if !is_root() {
         return PostAction::Elevate;
     }
     if states.get::<bool>("force").is_none_or(|x| !*x) {

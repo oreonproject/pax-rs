@@ -12,3 +12,4 @@ serde_json.workspace = true
 serde_norway.workspace = true
 settings.workspace = true
 tokio.workspace = true
+utils.workspace = true

@@ -1,10 +1,11 @@
 use std::{
-    fs::{DirBuilder, File},
+    fs::File,
     io::{Read, Write},
     path::PathBuf,
 };
 
 use serde::{Deserialize, Serialize};
+use utils::get_dir;
 
 #[derive(PartialEq, Serialize, Deserialize, Debug)]
 pub struct SettingsYaml {
@@ -84,24 +85,5 @@ fn affirm_path() -> Result<PathBuf, String> {
         }
     } else {
         Err(String::from("Settings file is of unexpected type!"))
-    }
-}
-
-pub fn get_dir() -> Result<PathBuf, String> {
-    let path = PathBuf::from("/etc/pax");
-    if !path.exists() && DirBuilder::new().create(&path).is_err() {
-        Err(String::from("Failed to create pax directory!"))
-    } else {
-        Ok(path)
-    }
-}
-
-pub fn get_metadata_dir() -> Result<PathBuf, String> {
-    let mut path = get_dir()?;
-    path.push("installed");
-    if !path.exists() && DirBuilder::new().create(&path).is_err() {
-        Err(String::from("Failed to create pax installation directory!"))
-    } else {
-        Ok(path)
     }
 }

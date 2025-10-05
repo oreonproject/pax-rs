@@ -1,13 +1,131 @@
 use semver::Version;
 use serde::{Deserialize, Serialize};
-use settings::get_metadata_dir;
 use std::{
+    collections::HashSet,
     fs::File,
     io::{Read, Write},
     path::{Path, PathBuf},
     process::Command as RunCommand,
 };
 use tokio::runtime::Runtime;
+use utils::{get_metadata_dir, tmpfile};
+
+pub fn build_deps(
+    args: &[String],
+    sources: &[String],
+    runtime: &Runtime,
+    priordeps: &mut HashSet<ProcessedMetaData>,
+    dependent: bool,
+) -> Result<Vec<ProcessedMetaData>, String> {
+    let mut metadatas = match runtime.block_on(get_metadatas(args, sources, dependent)) {
+        Ok(data) => data,
+        Err(faulty) => {
+            return Err(format!("Failed to locate package {faulty}."));
+        }
+    };
+    let deps_vec = match runtime.block_on(get_deps(&metadatas, sources)) {
+        Ok(data) => data,
+        Err(faulty) => {
+            return Err(format!("Failed to parse dependency {faulty}!"));
+        }
+    };
+    let mut deps = HashSet::new();
+    deps.extend(deps_vec);
+    let diff = deps
+        .difference(priordeps)
+        .collect::<Vec<&ProcessedMetaData>>()
+        .iter()
+        .map(|x| x.name.clone())
+        .collect::<Vec<String>>();
+    priordeps.extend(deps);
+    if !diff.is_empty() {
+        let data = build_deps(&diff, sources, runtime, priordeps, true)?;
+        for processed in data {
+            if !metadatas
+                .iter()
+                .any(|x| x.name == processed.name && x.version == processed.version)
+            {
+                metadatas.push(processed);
+            }
+        }
+    }
+    Ok(metadatas)
+}
+
+async fn get_metadatas(
+    apps: &[String],
+    sources: &[String],
+    dependent: bool,
+) -> Result<Vec<ProcessedMetaData>, String> {
+    print!("\x1B[2K\rReading package lists... 0%");
+    let mut metadatas = Vec::new();
+    let mut children = Vec::new();
+    for app in apps {
+        children.push(get_metadata(app, None, sources, dependent));
+    }
+    let count = children.len();
+    for (i, child) in children.into_iter().enumerate() {
+        print!("\rReading package lists... {}% ", i * 100 / count);
+        let _ = std::io::stdout().flush();
+        if let Some(child) = child.into_future().await {
+            metadatas.push(child);
+        } else {
+            return Err(apps[i].to_string());
+        }
+    }
+    print!("\rReading package lists... Done!");
+    Ok(metadatas)
+}
+
+async fn get_deps(
+    metadatas: &[ProcessedMetaData],
+    sources: &[String],
+) -> Result<Vec<ProcessedMetaData>, String> {
+    print!("\x1B[2K\rCollecting dependencies... 0%");
+    let mut deps = Vec::new();
+    let mut children = Vec::new();
+    for metadata in metadatas {
+        children.push(get_dep(metadata, sources));
+    }
+    let count = children.len();
+    for (i, child) in children.into_iter().enumerate() {
+        print!("\rCollecting dependencies... {}% ", i * 100 / count);
+        let _ = std::io::stdout().flush();
+        match child.into_future().await {
+            Ok(dep) => deps.extend(dep),
+            Err(faulty) => return Err(faulty),
+        }
+    }
+    print!("\rCollecting dependencies... Done!");
+    Ok(deps)
+}
+
+async fn get_dep(
+    metadata: &ProcessedMetaData,
+    sources: &[String],
+) -> Result<Vec<ProcessedMetaData>, String> {
+    let mut deps = Vec::new();
+    // These are important to the build process, so they need to be installed prior to
+    // installing the dependant, so they get pushed lower down the dependency Vec
+    // (lower means it will get installed earlier).
+    for dep in &metadata.dependencies {
+        if let PseudoProcessed::MetaData(metadata) = dep.to_processed(sources).await? {
+            if let Some(i) = deps.iter().position(|x| *x == *metadata) {
+                deps.remove(i);
+            }
+            deps.push(*metadata);
+        }
+    }
+    // The dependant can still be built without this dependency, so order doesn't matter.
+    for dep in &metadata.runtime_dependencies {
+        if let PseudoProcessed::MetaData(metadata) = dep.to_processed(sources).await?
+            && !deps.contains(&metadata)
+        {
+            deps.push(*metadata);
+        }
+    }
+    Ok(deps)
+}
 
 #[derive(PartialEq, Eq, Debug, Hash)]
 pub struct ProcessedMetaData {
@@ -19,15 +137,32 @@ pub struct ProcessedMetaData {
     pub dependent: bool,
     pub dependencies: Vec<DependKind>,
     pub runtime_dependencies: Vec<DependKind>,
-    pub build: String,
-    pub install: String,
-    pub uninstall: String,
+    pub install_kind: ProcessedInstallKind,
     pub hash: String,
 }
 
+#[derive(PartialEq, Eq, Debug, Hash)]
+pub enum ProcessedInstallKind {
+    PreBuilt(PreBuilt),
+    Compilable(ProcessedCompilable),
+}
+#[derive(PartialEq, Eq, Debug, Deserialize, Serialize, Hash, Clone)]
+pub struct PreBuilt {
+    pub critical: Vec<String>,
+    pub configs: Vec<String>,
+}
+#[derive(PartialEq, Eq, Debug, Hash)]
+pub struct ProcessedCompilable {
+    pub build: String,
+    pub install: String,
+    pub uninstall: String,
+    pub purge: String,
+}
+
 impl ProcessedMetaData {
-    pub async fn to_installed(&self, sources: &[String]) -> InstalledVersion {
+    pub async fn to_installed(&self, sources: &[String], kind: MetaDataKind) -> InstalledVersion {
         InstalledVersion {
+            kind,
             version: self.version.to_string(),
             origin: self.origin.clone(),
             dependent: self.dependent,
@@ -54,38 +189,56 @@ impl ProcessedMetaData {
                 dependencies
             },
             dependents: Vec::new(),
-            uninstall: self.uninstall.to_string(),
+            // uninstall: self.uninstall.to_string(),
+            install_kind: match &self.install_kind {
+                ProcessedInstallKind::PreBuilt(prebuilt) => {
+                    InstalledInstallKind::PreBuilt(prebuilt.clone())
+                }
+                ProcessedInstallKind::Compilable(comp) => {
+                    InstalledInstallKind::Compilable(InstalledCompilable {
+                        uninstall: comp.uninstall.clone(),
+                        purge: comp.purge.clone(),
+                    })
+                }
+            },
             hash: self.hash.to_string(),
         }
     }
-    pub fn install_package(self, sources: &[String], runtime: &Runtime) -> Result<(), String> {
-        let kind = self.kind.clone();
+    pub fn install_package(
+        self,
+        sources: &[String],
+        runtime: &Runtime,
+    ) -> Result<Option<PathBuf>, String> {
         let name = self.name.to_string();
-        let (path, loaded_data) = check_type_conflicts(&name, &kind)?;
-        let metadata = runtime.block_on(self.to_installed(sources));
+        println!("Installing {name}...");
+        let (path, loaded_data) = get_metadata_path(&name)?;
+        let metadata = runtime.block_on(self.to_installed(sources, self.kind.clone()));
         let mut loaded_data = if let Some(data) = loaded_data {
             data
         } else {
             InstalledMetaData {
                 name: name.clone(),
-                kind,
                 installed: Vec::new(),
             }
         };
         let deps = metadata.dependencies.clone();
         let ver = metadata.version.to_string();
-        if !loaded_data
-            .installed
-            .iter()
-            .any(|x| x.version == metadata.version)
-        {
-            loaded_data.installed.push(metadata);
+        if loaded_data.installed.iter().any(|x| {
+            Version::parse(&x.version).unwrap_or(Version::new(0, 0, 0))
+                >= Version::parse(&metadata.version).unwrap_or(Version::new(0, 0, 0))
+        }) {
+            return Ok(None);
         }
+        loaded_data.installed.push(metadata);
         loaded_data.write(&path)?;
         for dep in deps {
             dep.write_dependent(&name, &ver)?;
         }
-        Ok(())
+        let tmpfile = match tmpfile() {
+            Some(file) => file,
+            None => return Err(format!("Failed to reserve a file for {name}!")),
+        };
+        Ok(Some(tmpfile))
     }
 }
 
@@ -112,7 +265,7 @@ pub enum OriginKind {
     },
 }
 
-pub async fn get_metadata(
+async fn get_metadata(
     app: &str,
     version: Option<&str>,
     sources: &[String],
@@ -140,7 +293,7 @@ pub async fn get_metadata(
 }
 
 #[derive(PartialEq, Eq, Debug)]
-pub enum PseudoProcessed {
+enum PseudoProcessed {
     MetaData(Box<ProcessedMetaData>),
     Specific(Specific),
     Volatile,
@@ -153,7 +306,7 @@ pub enum DependKind {
 }
 
 impl DependKind {
-    pub async fn to_processed(&self, sources: &[String]) -> Result<PseudoProcessed, String> {
+    async fn to_processed(&self, sources: &[String]) -> Result<PseudoProcessed, String> {
         match self {
             DependKind::Latest(latest) => {
                 if let Some(data) = get_metadata(latest, None, sources, true).await {
@@ -256,7 +409,6 @@ impl Specific {
                         self.name, self.version
                     ));
                 }
-
                 data
             } else {
                 return Err(format!(
@@ -325,7 +477,6 @@ impl Specific {
 
 struct InstalledMetaData {
     name: String,
-    kind: MetaDataKind,
     installed: Vec<InstalledVersion>,
 }
 
@@ -353,9 +504,8 @@ impl InstalledMetaData {
         }
     }
     pub fn _remove_package(&mut self, version: &str) -> Result<(), String> {
-        let kind = self.kind.clone();
         let name = self.name.to_string();
-        let (path, loaded_data) = check_type_conflicts(&name, &kind)?;
+        let (path, loaded_data) = get_metadata_path(&name)?;
         let mut loaded_data = match loaded_data {
             Some(data) => data,
             None => return Err(format!("Package {name} is not installed!")),
@@ -421,13 +571,24 @@ impl InstalledMetaData {
 
 #[derive(PartialEq, Deserialize, Serialize, Debug, Clone)]
 pub struct InstalledVersion {
+    pub kind: MetaDataKind,
     pub version: String,
     pub origin: OriginKind,
     pub dependent: bool,
     pub dependencies: Vec<Specific>,
     pub dependents: Vec<Specific>,
-    pub uninstall: String,
+    pub install_kind: InstalledInstallKind,
     pub hash: String,
+}
+#[derive(PartialEq, Deserialize, Serialize, Debug, Clone)]
+pub enum InstalledInstallKind {
+    PreBuilt(PreBuilt),
+    Compilable(InstalledCompilable),
+}
+#[derive(PartialEq, Deserialize, Serialize, Debug, Clone)]
+pub struct InstalledCompilable {
+    pub uninstall: String,
+    pub purge: String,
 }
 
 #[derive(PartialEq, Deserialize, Debug)]
@@ -441,6 +602,7 @@ struct RawPax {
     build: String,
     install: String,
     uninstall: String,
+    purge: String,
     hash: String,
 }
 
@@ -513,17 +675,17 @@ impl RawPax {
             dependent,
             dependencies,
             runtime_dependencies,
-            build: self.build,
-            install: self.install,
-            uninstall: self.uninstall,
+            install_kind: ProcessedInstallKind::Compilable(ProcessedCompilable {
+                build: self.build,
+                install: self.install,
+                uninstall: self.uninstall,
+                purge: self.purge,
+            }),
             hash: self.hash,
         })
     }
 }
-fn check_type_conflicts(
-    name: &str,
-    kind: &MetaDataKind,
-) -> Result<(PathBuf, Option<InstalledMetaData>), String> {
+fn get_metadata_path(name: &str) -> Result<(PathBuf, Option<InstalledMetaData>), String> {
     let mut path = get_metadata_dir()?;
     path.push(format!("{name}.yaml"));
     if !path.exists() {
@@ -534,17 +696,10 @@ fn check_type_conflicts(
             if file.read_to_string(&mut metadata).is_err() {
                 return Err(format!("Failed to read `{name}`'s config!"));
             }
-            let data = match serde_norway::from_str::<InstalledMetaData>(&metadata) {
-                Ok(data) => data,
-                Err(_) => return Err(String::from("Failed to parse data into InstalledMetaData!")),
-            };
-            if data.kind != *kind {
-                Err(format!(
-                    "Package is installed from {} but attempting to install from {kind}!",
-                    data.kind
-                ))
-            } else {
+            if let Ok(data) = serde_norway::from_str::<InstalledMetaData>(&metadata) {
                 Ok((path, Some(data)))
+            } else {
+                Err(String::from("Failed to parse data into InstalledMetaData!"))
             }
         } else {
             Err(format!("Failed to read `{name}`'s metadata!"))
