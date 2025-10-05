@@ -12,7 +12,9 @@ enum HandlerResult {
 // The action to perform once a command has run
 pub enum PostAction {
     Elevate,
+    Err(i32),
     GetHelp,
+    NothingToDo,
     PullSources,
     Return,
 }
@@ -288,7 +290,9 @@ impl Command {
                     Some(false) => (),
                 }
             }
+            PostAction::Err(code) => std::process::exit(code),
             PostAction::GetHelp => println!("{}", self.help()),
+            PostAction::NothingToDo => println!("Nothing to do."),
             PostAction::PullSources => {
                 match choice("\x1B[2K\rMissing sources.txt! Try pull them now?", false) {
                     None => println!("\nFailed to read terminal input!"),

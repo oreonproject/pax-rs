@@ -2,7 +2,7 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
-    fs::File,
+    fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
     process::Command as RunCommand,
@@ -67,7 +67,7 @@ async fn get_metadatas(
     for (i, child) in children.into_iter().enumerate() {
         print!("\rReading package lists... {}% ", i * 100 / count);
         let _ = std::io::stdout().flush();
-        if let Some(child) = child.into_future().await {
+        if let Some(child) = child.await {
             metadatas.push(child);
         } else {
             return Err(apps[i].to_string());
@@ -91,7 +91,7 @@ async fn get_deps(
     for (i, child) in children.into_iter().enumerate() {
         print!("\rCollecting dependencies... {}% ", i * 100 / count);
         let _ = std::io::stdout().flush();
-        match child.into_future().await {
+        match child.await {
             Ok(dep) => deps.extend(dep),
             Err(faulty) => return Err(faulty),
         }
@@ -173,7 +173,7 @@ impl ProcessedMetaData {
                     children.push(dep.to_processed(sources));
                 }
                 for child in children {
-                    if let Ok(child) = child.into_future().await {
+                    if let Ok(child) = child.await {
                         match child {
                             PseudoProcessed::MetaData(data) => {
                                 dependencies.push(Specific {
@@ -445,32 +445,6 @@ impl Specific {
             Err(format!("Cannot find data for dependency `{}`!", self.name))
         }
     }
-    pub fn _remove(&self, kind: &str) -> Result<(), String> {
-        let mut path = get_metadata_dir()?;
-        path.push(format!("{}.yaml", self.name));
-        let mut data = if path.is_file() {
-            if let Ok(mut file) = File::open(&path) {
-                let mut metadata = String::new();
-                if file.read_to_string(&mut metadata).is_err() {
-                    return Err(format!("Failed to read {kind} `{}`'s config!", self.name));
-                }
-                match serde_norway::from_str::<InstalledMetaData>(&metadata) {
-                    Ok(data) => data,
-                    Err(_) => {
-                        return Err(format!("Failed to parse {kind} `{}`'s data!", self.name));
-                    }
-                }
-            } else {
-                return Err(format!("Failed to read {kind} `{}`'s metadata!", self.name));
-            }
-        } else {
-            return Err(format!(
-                "Failed to locate {kind} `{}`'s metadata!",
-                self.name
-            ));
-        };
-        data._remove_package(&self.version)
-    }
 }
 
 #[derive(PartialEq, Deserialize, Serialize, Debug)]
@@ -481,9 +455,15 @@ struct InstalledMetaData {
 }
 
 impl InstalledMetaData {
-    pub fn write(&self, path: &Path) -> Result<(), String> {
-        if !path.exists() || path.is_file() {
-            let data = match serde_norway::to_string(self) {
+    pub fn write(self, path: &Path) -> Result<Option<Self>, String> {
+        if self.installed.is_empty() {
+            if fs::remove_file(path).is_err() {
+                Err(format!("Failed to remove {}!", &self.name))
+            } else {
+                Ok(None)
+            }
+        } else if !path.exists() || path.is_file() {
+            let data = match serde_norway::to_string(&self) {
                 Ok(data) => data,
                 Err(_) => {
                     return Err(String::from(
@@ -496,75 +476,11 @@ impl InstalledMetaData {
                 Err(_) => return Err(String::from("Failed to open file as WO!")),
             };
             match file.write_all(data.as_bytes()) {
-                Ok(_) => Ok(()),
+                Ok(_) => Ok(Some(self)),
                 Err(_) => Err(String::from("Failed to write to file!")),
             }
         } else {
             Err(String::from("File is of unexpected type!"))
-        }
-    }
-    pub fn _remove_package(&mut self, version: &str) -> Result<(), String> {
-        let name = self.name.to_string();
-        let (path, loaded_data) = get_metadata_path(&name)?;
-        let mut loaded_data = match loaded_data {
-            Some(data) => data,
-            None => return Err(format!("Package {name} is not installed!")),
-        };
-        // let (metadata, version) = if let Some(version) = version {
-        let (metadata, version) = match self.installed.iter().find(|x| x.version == *version) {
-            Some(metadata) => (metadata, version.to_string()),
-            None => {
-                return Err(format!(
-                    "Failed to locate version {version} for package`{name}`."
-                ));
-            }
-        };
-        // } else {
-        //     let installed = &mut self.installed;
-        //     installed.sort_by_key(|x| {
-        //         Version::parse(&x.version.clone()).unwrap_or(Version::new(0, 0, 0))
-        //     });
-        //     match installed.last() {
-        //         Some(metadata) => (metadata, metadata.version.clone()),
-        //         None => return Err(format!("Failed to locate package `{name}`.")),
-        //     }
-        // };
-        if metadata.dependent {
-            for dependent in &metadata.dependents {
-                dependent._remove("dependent")?
-            }
-            Ok(())
-        } else {
-            for dependency in &metadata.dependencies {
-                dependency._remove("dependency")?
-            }
-            if let Some(index) = loaded_data
-                .installed
-                .iter()
-                .position(|x| x.version == version)
-            {
-                loaded_data.installed.remove(index);
-            };
-            if !loaded_data.installed.is_empty() {
-                let mut file = match File::open(&path) {
-                    Ok(file) => file,
-                    Err(_) => return Err(format!("Failed to read `{name}`'s metadata!")),
-                };
-                let data = match serde_norway::to_string(&loaded_data) {
-                    Ok(data) => data,
-                    Err(_) => {
-                        return Err(format!("Failed to parse `{name}`'s metadata into string!"));
-                    }
-                };
-                match file.write_all(data.as_bytes()) {
-                    Ok(_) => Ok(()),
-                    Err(_) => Err(format!("Failed to write to `{name}`'s file!")),
-                }
-            } else if std::fs::remove_file(&path).is_err() {
-                Err(format!("Failed to remove `{name}`'s metadata file!"))
-            } else {
-                Ok(())
-            }
         }
     }
 }
@@ -580,6 +496,7 @@ pub struct InstalledVersion {
     pub install_kind: InstalledInstallKind,
     pub hash: String,
 }
+
 #[derive(PartialEq, Deserialize, Serialize, Debug, Clone)]
 pub enum InstalledInstallKind {
     PreBuilt(PreBuilt),
@@ -707,4 +624,67 @@ fn get_metadata_path(name: &str) -> Result<(PathBuf, Option<InstalledMetaData>),
     } else {
         Err(format!("`{name}`'s metadata file is of unexpected type!"))
     }
+}
+
+pub async fn get_local_deps(
+    args: &[(&String, Option<&String>)],
+) -> Result<HashSet<Specific>, String> {
+    print!("\x1B[2K\rCollecting dependencies... 0%");
+    let mut children = Vec::new();
+    for dep in args {
+        children.push(get_local_dep(dep));
+    }
+    let mut result = HashSet::new();
+    let count = children.len();
+    for (i, child) in children.into_iter().enumerate() {
+        print!("\rCollecting dependencies... {}% ", i * 100 / count);
+        result.extend(child.await?);
+    }
+    print!("\rCollecting dependencies... Done!");
+    Ok(result)
+}
+
+async fn get_local_dep(dep: &(&String, Option<&String>)) -> Result<HashSet<Specific>, String> {
+    let (dep, ver) = *dep;
+    let mut path = get_metadata_dir()?;
+    path.push(format!("{}.yaml", dep));
+    let mut file = match File::open(&path) {
+        Ok(file) => file,
+        Err(_) => return Err(format!("Failed to read package `{dep}`'s metadata!")),
+    };
+    let mut metadata = String::new();
+    if file.read_to_string(&mut metadata).is_err() {
+        return Err(format!("Failed to read package `{dep}`'s config!"));
+    }
+    let data = match serde_norway::from_str::<InstalledMetaData>(&metadata) {
+        Ok(data) => data,
+        Err(_) => return Err(format!("Failed to parse package `{dep}`'s data!")),
+    };
+    let mut working = Vec::new();
+    if let Some(ver) = ver {
+        if let Some(specific) = data.installed.iter().find(|x| x.version == *ver) {
+            working.push(specific);
+        }
+    } else {
+        working.extend(
+            data.installed
+                .iter()
+                .filter(|x| !x.dependent)
+                .collect::<Vec<&InstalledVersion>>(),
+        );
+    }
+    let mut result = HashSet::new();
+    for version in working {
+        for dependent in &version.dependencies {
+            let items =
+                Box::pin(get_local_dep(&(&dependent.name, Some(&dependent.version)))).await?;
+            result.extend(items);
+            result.insert(dependent.clone());
+        }
+        result.insert(Specific {
+            name: data.name.to_string(),
+            version: version.version.to_string(),
+        });
+    }
+    Ok(result)
 }

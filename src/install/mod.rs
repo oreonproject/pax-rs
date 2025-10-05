@@ -23,7 +23,7 @@ fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
         return PostAction::Elevate;
     }
     let args = match args {
-        None => return PostAction::Return,
+        None => return PostAction::NothingToDo,
         Some(args) => args,
     };
     print!("Reading sources...");
