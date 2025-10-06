@@ -111,13 +111,34 @@ fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
     for pkg_name in args {
         // Check if this is a local file path
         if std::path::Path::new(pkg_name).exists() {
-            
-            // Extract package metadata to get package info
-            let metadata = match extract_package_metadata(pkg_name) {
-                Ok(m) => m,
-                Err(e) => {
-                    println!("Failed to read package metadata: {}", e);
+            // Detect package type
+            let pkg_type = match detect_package_type(std::path::Path::new(pkg_name)) {
+                Some(t) => t,
+                None => {
+                    println!("Unknown package type: {}", pkg_name);
                     return PostAction::Return;
+                }
+            };
+            
+            // Extract package metadata based on type
+            let metadata = match pkg_type {
+                PackageType::Pax => {
+                    match extract_pax_metadata(pkg_name) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            println!("Failed to read PAX package metadata: {}", e);
+                            return PostAction::Return;
+                        }
+                    }
+                }
+                PackageType::Rpm | PackageType::Deb => {
+                    match extract_native_metadata(pkg_name, pkg_type) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            println!("Failed to read {} package metadata: {}", pkg_type.as_str(), e);
+                            return PostAction::Return;
+                        }
+                    }
                 }
             };
             
@@ -190,12 +211,36 @@ fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
         );
     }
 
+    // Check for unmet dependencies BEFORE resolving
+    println!("Checking dependencies...");
+    let mut unmet_deps = Vec::new();
+    
+    for (pkg_name, (_, entry)) in &packages_to_install {
+        for dep in &entry.dependencies {
+            // Check if dependency is satisfied by system or will be installed
+            if !provides_mgr.is_satisfied(dep).unwrap_or(false) 
+                && !packages_to_install.contains_key(dep)
+                && !db.is_installed(dep).unwrap_or(false) {
+                unmet_deps.push((pkg_name.clone(), dep.clone()));
+            }
+        }
+    }
+    
+    if !unmet_deps.is_empty() {
+        println!("\n\x1B[31mError: Unmet dependencies detected!\x1B[0m");
+        for (pkg, dep) in &unmet_deps {
+            println!("  {} requires: {}", pkg, dep);
+        }
+        println!("\nInstallation aborted. Please install missing dependencies first.");
+        return PostAction::Return;
+    }
+
     // Resolve dependencies
     let package_names: Vec<String> = packages_to_install.keys().cloned().collect();
     let resolved = match resolver.resolve(&package_names, &available) {
         Ok(r) => r,
         Err(e) => {
-            println!("Dependency resolution failed: {}", e);
+            println!("\x1B[31mDependency resolution failed: {}\x1B[0m", e);
             return PostAction::Return;
         }
     };
@@ -315,20 +360,19 @@ fn install_package(
     let hash = entry.hash.clone();
     
     // Detect package type and extract
-    let files = if let Some(pkg_type) = detect_package_type(&pkg_path) {
-        match pkg_type {
+    let (files, pkg_type) = if let Some(pkg_type) = detect_package_type(&pkg_path) {
+        let files = match pkg_type {
             PackageType::Pax => {
                 store.extract_pax_package(&pkg_path, &hash)?
             }
             PackageType::Rpm => {
-                // for rpm/deb, we'd use the adapters to extract
-                // simplified for now
-                store.extract_pax_package(&pkg_path, &hash)?
+                extract_rpm_to_store(&pkg_path, &hash, store)?
             }
             PackageType::Deb => {
-                store.extract_pax_package(&pkg_path, &hash)?
+                extract_deb_to_store(&pkg_path, &hash, store)?
             }
-        }
+        };
+        (files, pkg_type)
     } else {
         return Err("Unknown package type".to_string());
     };
@@ -364,6 +408,9 @@ fn install_package(
             .map_err(|e| format!("Failed to add provide: {}", e))?;
     }
 
+    // Run pre-install scriptlets
+    let _ = run_scriptlets(&pkg_path, pkg_type, "pre", pkg_id, &store.get_package_path(&hash));
+    
     // Create symlinks
     println!("Creating symlinks...");
     symlink_mgr.create_symlinks(
@@ -373,13 +420,16 @@ fn install_package(
         &files,
     )?;
 
+    // Run post-install scriptlets
+    let _ = run_scriptlets(&pkg_path, pkg_type, "post", pkg_id, &store.get_package_path(&hash));
+
     println!("  {} installed successfully", pkg_name);
 
     Ok(())
 }
 
 /// Extract metadata from a local .pax package
-fn extract_package_metadata(package_path: &str) -> Result<LocalPackageMetadata, String> {
+fn extract_pax_metadata(package_path: &str) -> Result<LocalPackageMetadata, String> {
     use tempfile::TempDir;
     use std::process::Command;
     
@@ -433,6 +483,340 @@ fn extract_package_metadata(package_path: &str) -> Result<LocalPackageMetadata, 
     
     serde_yaml::from_str(&metadata_content)
         .map_err(|e| format!("Failed to parse metadata: {}", e))
+}
+
+/// Extract metadata from RPM or DEB packages
+fn extract_native_metadata(package_path: &str, pkg_type: PackageType) -> Result<LocalPackageMetadata, String> {
+    match pkg_type {
+        PackageType::Rpm => extract_rpm_metadata(package_path),
+        PackageType::Deb => extract_deb_metadata(package_path),
+        _ => Err("Unsupported package type".to_string()),
+    }
+}
+
+/// Extract metadata from RPM package
+fn extract_rpm_metadata(package_path: &str) -> Result<LocalPackageMetadata, String> {
+    use std::process::Command;
+    
+    // Use rpm command to query package info
+    let name_output = Command::new("rpm")
+        .args(&["-qp", "--queryformat", "%{NAME}", package_path])
+        .output()
+        .map_err(|e| format!("Failed to run rpm command: {}", e))?;
+    
+    if !name_output.status.success() {
+        return Err(format!("Failed to query RPM: {}", String::from_utf8_lossy(&name_output.stderr)));
+    }
+    
+    let name = String::from_utf8_lossy(&name_output.stdout).to_string();
+    
+    let version_output = Command::new("rpm")
+        .args(&["-qp", "--queryformat", "%{VERSION}-%{RELEASE}", package_path])
+        .output()
+        .map_err(|e| format!("Failed to query RPM version: {}", e))?;
+    let version = String::from_utf8_lossy(&version_output.stdout).to_string();
+    
+    let desc_output = Command::new("rpm")
+        .args(&["-qp", "--queryformat", "%{SUMMARY}", package_path])
+        .output()
+        .map_err(|e| format!("Failed to query RPM description: {}", e))?;
+    let description = String::from_utf8_lossy(&desc_output.stdout).to_string();
+    
+    // Get dependencies
+    let deps_output = Command::new("rpm")
+        .args(&["-qp", "--requires", package_path])
+        .output()
+        .map_err(|e| format!("Failed to query RPM dependencies: {}", e))?;
+    let dependencies: Vec<String> = String::from_utf8_lossy(&deps_output.stdout)
+        .lines()
+        .filter(|line| !line.trim().is_empty() && !line.starts_with("rpmlib("))
+        .map(|line| line.split_whitespace().next().unwrap_or(line).to_string())
+        .collect();
+    
+    // Get provides
+    let prov_output = Command::new("rpm")
+        .args(&["-qp", "--provides", package_path])
+        .output()
+        .map_err(|e| format!("Failed to query RPM provides: {}", e))?;
+    let provides: Vec<String> = String::from_utf8_lossy(&prov_output.stdout)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.split_whitespace().next().unwrap_or(line).to_string())
+        .collect();
+    
+    // Get architecture
+    let arch_output = Command::new("rpm")
+        .args(&["-qp", "--queryformat", "%{ARCH}", package_path])
+        .output()
+        .map_err(|e| format!("Failed to query RPM arch: {}", e))?;
+    let arch = if arch_output.status.success() {
+        let arch_str = String::from_utf8_lossy(&arch_output.stdout).to_string();
+        if arch_str.is_empty() || arch_str == "noarch" {
+            vec!["x86_64".to_string(), "aarch64".to_string()]
+        } else {
+            vec![arch_str]
+        }
+    } else {
+        vec!["x86_64".to_string()]
+    };
+    
+    // Get file list
+    let files_output = Command::new("rpm")
+        .args(&["-qpl", package_path])
+        .output()
+        .map_err(|e| format!("Failed to query RPM files: {}", e))?;
+    let files: Vec<String> = String::from_utf8_lossy(&files_output.stdout)
+        .lines()
+        .filter(|line| !line.trim().is_empty() && !line.starts_with("/"))
+        .map(|line| line.trim_start_matches('/').to_string())
+        .collect();
+    
+    Ok(LocalPackageMetadata {
+        name,
+        version,
+        description,
+        arch,
+        dependencies,
+        runtime_dependencies: Vec::new(),
+        provides,
+        conflicts: Vec::new(),
+        install_script: None,
+        uninstall_script: None,
+        files,
+    })
+}
+
+/// Extract metadata from DEB package
+fn extract_deb_metadata(package_path: &str) -> Result<LocalPackageMetadata, String> {
+    use std::process::Command;
+    
+    // Use dpkg-deb to query package info
+    let info_output = Command::new("dpkg-deb")
+        .args(&["-f", package_path])
+        .output()
+        .map_err(|e| format!("Failed to run dpkg-deb: {}", e))?;
+    
+    if !info_output.status.success() {
+        return Err(format!("Failed to query DEB: {}", String::from_utf8_lossy(&info_output.stderr)));
+    }
+    
+    let info = String::from_utf8_lossy(&info_output.stdout);
+    let mut name = String::new();
+    let mut version = String::new();
+    let mut description = String::new();
+    let mut arch = Vec::new();
+    let mut dependencies = Vec::new();
+    let mut provides = Vec::new();
+    
+    for line in info.lines() {
+        if let Some(value) = line.strip_prefix("Package: ") {
+            name = value.trim().to_string();
+        } else if let Some(value) = line.strip_prefix("Version: ") {
+            version = value.trim().to_string();
+        } else if let Some(value) = line.strip_prefix("Description: ") {
+            description = value.trim().to_string();
+        } else if let Some(value) = line.strip_prefix("Architecture: ") {
+            let arch_str = value.trim().to_string();
+            arch = if arch_str == "all" {
+                vec!["x86_64".to_string(), "aarch64".to_string()]
+            } else {
+                // Map Debian arch names to common names
+                let mapped_arch = match arch_str.as_str() {
+                    "amd64" => "x86_64",
+                    "arm64" => "aarch64",
+                    "i386" => "i686",
+                    _ => &arch_str,
+                };
+                vec![mapped_arch.to_string()]
+            };
+        } else if let Some(value) = line.strip_prefix("Depends: ") {
+            dependencies = value
+                .split(',')
+                .map(|d| d.trim().split_whitespace().next().unwrap_or(d.trim()).to_string())
+                .collect();
+        } else if let Some(value) = line.strip_prefix("Provides: ") {
+            provides = value
+                .split(',')
+                .map(|p| p.trim().to_string())
+                .collect();
+        }
+    }
+    
+    // Default architecture if not found
+    if arch.is_empty() {
+        arch = vec!["x86_64".to_string()];
+    }
+    
+    // Get file list
+    let files_output = Command::new("dpkg-deb")
+        .args(&["-c", package_path])
+        .output()
+        .map_err(|e| format!("Failed to query DEB files: {}", e))?;
+    let files: Vec<String> = String::from_utf8_lossy(&files_output.stdout)
+        .lines()
+        .filter_map(|line| {
+            line.split_whitespace().last().and_then(|path| {
+                if path.starts_with("./") {
+                    Some(path.trim_start_matches("./").to_string())
+                } else {
+                    None
+                }
+            })
+        })
+        .collect();
+    
+    if provides.is_empty() {
+        provides.push(name.clone());
+    }
+    
+    Ok(LocalPackageMetadata {
+        name,
+        version,
+        description,
+        arch,
+        dependencies,
+        runtime_dependencies: Vec::new(),
+        provides,
+        conflicts: Vec::new(),
+        install_script: None,
+        uninstall_script: None,
+        files,
+    })
+}
+
+/// Extract RPM package to store
+fn extract_rpm_to_store(rpm_path: &std::path::Path, hash: &str, store: &PackageStore) -> Result<Vec<String>, String> {
+    use std::process::Command;
+    
+    let dest = store.get_package_path(hash);
+    fs::create_dir_all(&dest)
+        .map_err(|e| format!("Failed to create package directory: {}", e))?;
+    
+    // Extract RPM using rpm2cpio and cpio
+    let rpm2cpio = Command::new("rpm2cpio")
+        .arg(rpm_path)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to run rpm2cpio: {}", e))?;
+    
+    let cpio = Command::new("cpio")
+        .args(&["-idm"])
+        .current_dir(&dest)
+        .stdin(rpm2cpio.stdout.unwrap())
+        .output()
+        .map_err(|e| format!("Failed to run cpio: {}", e))?;
+    
+    if !cpio.status.success() {
+        return Err(format!("Failed to extract RPM: {}", String::from_utf8_lossy(&cpio.stderr)));
+    }
+    
+    // List extracted files
+    store.list_package_files(hash)
+}
+
+/// Extract DEB package to store
+fn extract_deb_to_store(deb_path: &std::path::Path, hash: &str, store: &PackageStore) -> Result<Vec<String>, String> {
+    use std::process::Command;
+    
+    let dest = store.get_package_path(hash);
+    fs::create_dir_all(&dest)
+        .map_err(|e| format!("Failed to create package directory: {}", e))?;
+    
+    // Extract DEB using dpkg-deb
+    let output = Command::new("dpkg-deb")
+        .args(&["-x", deb_path.to_str().unwrap(), dest.to_str().unwrap()])
+        .output()
+        .map_err(|e| format!("Failed to run dpkg-deb: {}", e))?;
+    
+    if !output.status.success() {
+        return Err(format!("Failed to extract DEB: {}", String::from_utf8_lossy(&output.stderr)));
+    }
+    
+    // List extracted files
+    store.list_package_files(hash)
+}
+
+/// Run package scriptlets
+fn run_scriptlets(pkg_path: &std::path::Path, pkg_type: PackageType, stage: &str, pkg_id: i64, store_path: &std::path::Path) -> Result<(), String> {
+    use std::process::Command;
+    
+    match pkg_type {
+        PackageType::Rpm => {
+            println!("Running RPM {} scriptlets...", stage);
+            // Extract and run RPM scriptlets
+            let script_query = match stage {
+                "pre" => "--script=prein",
+                "post" => "--script=postin",
+                "preun" => "--script=preun",
+                "postun" => "--script=postun",
+                _ => return Ok(()),
+            };
+            
+            let script_output = Command::new("rpm")
+                .args(&["-qp", script_query, pkg_path.to_str().unwrap()])
+                .output()
+                .map_err(|e| format!("Failed to query RPM scriptlets: {}", e))?;
+            
+            if script_output.status.success() {
+                let script = String::from_utf8_lossy(&script_output.stdout);
+                if !script.trim().is_empty() {
+                    // Run scriptlet with proper environment
+                    let output = Command::new("sh")
+                        .arg("-c")
+                        .arg(&script.to_string())
+                        .env("RPM_INSTALL_PREFIX", store_path)
+                        .output()
+                        .map_err(|e| format!("Failed to run scriptlet: {}", e))?;
+                    
+                    if !output.status.success() {
+                        eprintln!("Warning: {} scriptlet failed: {}", stage, String::from_utf8_lossy(&output.stderr));
+                    }
+                }
+            }
+        }
+        PackageType::Deb => {
+            println!("Running DEB {} scripts...", stage);
+            // Extract and run DEB maintainer scripts
+            let script_name = match stage {
+                "pre" => "preinst",
+                "post" => "postinst",
+                "preun" => "prerm",
+                "postun" => "postrm",
+                _ => return Ok(()),
+            };
+            
+            // Extract the control archive
+            let control_output = Command::new("dpkg-deb")
+                .args(&["--control", pkg_path.to_str().unwrap()])
+                .current_dir("/tmp")
+                .output()
+                .map_err(|e| format!("Failed to extract DEB control: {}", e))?;
+            
+            if control_output.status.success() {
+                let script_path = format!("/tmp/DEBIAN/{}", script_name);
+                if std::path::Path::new(&script_path).exists() {
+                    let output = Command::new(&script_path)
+                        .arg("install")
+                        .env("DPKG_MAINTSCRIPT_PACKAGE", pkg_id.to_string())
+                        .output()
+                        .map_err(|e| format!("Failed to run {} script: {}", script_name, e))?;
+                    
+                    if !output.status.success() {
+                        eprintln!("Warning: {} script failed: {}", script_name, String::from_utf8_lossy(&output.stderr));
+                    }
+                    
+                    // Cleanup
+                    let _ = fs::remove_file(&script_path);
+                }
+            }
+        }
+        PackageType::Pax => {
+            // PAX packages handle scripts via metadata.yaml
+            // This is handled separately
+        }
+    }
+    
+    Ok(())
 }
 
 /// Calculate SHA256 hash of a file

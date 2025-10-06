@@ -184,14 +184,75 @@ impl DownloadManager {
     }
 
     // Remove old cached files
-    pub fn clean_old_cache(&self, _keep_latest: usize) -> Result<Vec<String>, String> {
-        // Group files by package name
-        // Keep only the latest N versions of each package
-        // This is simplified - in production would parse versions properly
+    pub fn clean_old_cache(&self, keep_latest: usize) -> Result<Vec<String>, String> {
+        use std::collections::HashMap;
+        use std::time::SystemTime;
         
-        let removed = Vec::new();
+        let mut removed = Vec::new();
         
-        // todo: implement smart cache cleaning
+        if keep_latest == 0 {
+            return Ok(removed);
+        }
+        
+        // Group files by package name (extract from filename)
+        let mut packages: HashMap<String, Vec<(String, SystemTime)>> = HashMap::new();
+        
+        let entries = fs::read_dir(&self.cache_dir)
+            .map_err(|e| format!("Failed to read cache directory: {}", e))?;
+        
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
+            let path = entry.path();
+            
+            if !path.is_file() {
+                continue;
+            }
+            
+            let filename = match path.file_name().and_then(|n| n.to_str()) {
+                Some(f) => f.to_string(),
+                None => continue,
+            };
+            
+            // Extract package name (everything before first version-like pattern)
+            let pkg_name = if let Some(pos) = filename.find(|c: char| c.is_numeric()) {
+                filename[..pos].trim_end_matches('-').to_string()
+            } else {
+                filename.clone()
+            };
+            
+            // Get file modification time
+            let metadata = fs::metadata(&path)
+                .map_err(|e| format!("Failed to get file metadata: {}", e))?;
+            let modified = metadata.modified()
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            
+            packages.entry(pkg_name)
+                .or_insert_with(Vec::new)
+                .push((path.to_string_lossy().to_string(), modified));
+        }
+        
+        // For each package, keep only the latest N versions
+        for (_pkg_name, mut files) in packages {
+            if files.len() <= keep_latest {
+                continue;
+            }
+            
+            // Sort by modification time (newest first)
+            files.sort_by(|a, b| b.1.cmp(&a.1));
+            
+            // Remove old versions
+            for (path, _) in files.iter().skip(keep_latest) {
+                match fs::remove_file(path) {
+                    Ok(_) => {
+                        removed.push(path.clone());
+                        println!("Removed old cached file: {}", path);
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: Failed to remove {}: {}", path, e);
+                    }
+                }
+            }
+        }
         
         Ok(removed)
     }

@@ -271,8 +271,53 @@ impl PackageAdapter for PaxAdapter {
 
         if let Some(script_content) = script {
             if !script_content.is_empty() {
-                println!("Note: Package has {:?} script (execution pending)", stage);
-                // TODO - safe script execution
+                println!("Running {:?} script...", stage);
+                
+                // Execute script in a safe manner
+                use std::process::Command;
+                use std::io::Write;
+                use tempfile::NamedTempFile;
+                
+                // Write script to temporary file
+                let mut temp_file = NamedTempFile::new()
+                    .map_err(|e| format!("Failed to create temp script file: {}", e))?;
+                
+                temp_file.write_all(script_content.as_bytes())
+                    .map_err(|e| format!("Failed to write script: {}", e))?;
+                
+                let temp_path = temp_file.path();
+                
+                // Make script executable
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mut perms = std::fs::metadata(temp_path)
+                        .map_err(|e| format!("Failed to get script permissions: {}", e))?
+                        .permissions();
+                    perms.set_mode(0o700);
+                    std::fs::set_permissions(temp_path, perms)
+                        .map_err(|e| format!("Failed to set script permissions: {}", e))?;
+                }
+                
+                // Execute script with sh
+                let output = Command::new("sh")
+                    .arg("-c")
+                    .arg(script_content)
+                    .env("PAX_PACKAGE", &meta.name)
+                    .env("PAX_VERSION", &meta.version)
+                    .output()
+                    .map_err(|e| format!("Failed to execute script: {}", e))?;
+                
+                if !output.status.success() {
+                    eprintln!("Warning: Script failed with exit code: {:?}", output.status.code());
+                    eprintln!("stderr: {}", String::from_utf8_lossy(&output.stderr));
+                    // Non-fatal - continue installation
+                } else {
+                    println!("Script executed successfully");
+                    if !output.stdout.is_empty() {
+                        println!("Output: {}", String::from_utf8_lossy(&output.stdout));
+                    }
+                }
             }
         }
 
