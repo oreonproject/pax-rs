@@ -1,6 +1,6 @@
 use super::*;
 use std::fs::File;
-use std::io::{Read, BufRead, BufReader};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use ar::Archive as ArArchive;
 use tar::Archive as TarArchive;

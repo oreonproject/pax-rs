@@ -132,7 +132,7 @@ impl ProvidesManager {
     }
 
     // List all provides for a package
-    pub fn list_package_provides(&self, package_id: i64) -> Result<Vec<String>, String> {
+    pub fn list_package_provides(&self, _package_id: i64) -> Result<Vec<String>, String> {
         // This would require a new db method
         // For now return empty
         Ok(Vec::new())

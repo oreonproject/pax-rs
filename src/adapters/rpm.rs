@@ -1,10 +1,5 @@
 use super::*;
-use std::fs::File;
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use flate2::read::GzDecoder;
-use tar::Archive;
-use walkdir::WalkDir;
 
 // RPM package adapter
 pub struct RpmAdapter {

@@ -25,14 +25,19 @@ impl SymlinkManager {
     pub fn create_symlinks(
         &self,
         package_id: i64,
-        package_hash: &str,
+        _package_hash: &str,
         store_path: &Path,
         files: &[String],
     ) -> Result<Vec<(String, String)>, String> {
         let mut created_links = Vec::new();
 
         for file in files {
-            let source = store_path.join(package_hash).join(file);
+            // Skip metadata.yaml - it's not a file to be symlinked
+            if file == "metadata.yaml" {
+                continue;
+            }
+            
+            let source = store_path.join(file);
             
             if !source.exists() {
                 continue;

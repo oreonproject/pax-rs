@@ -1,7 +1,6 @@
 use crate::crypto;
-use crate::{Command, Flag, PostAction, StateBox};
+use crate::{Command, PostAction, StateBox};
 use nix::unistd;
-use std::fs;
 use std::path::Path;
 
 pub fn build(hierarchy: &[String]) -> Command {

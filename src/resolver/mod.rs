@@ -1,7 +1,7 @@
-use crate::adapters::{Dependency, DependencyType};
+use crate::adapters::Dependency;
 use crate::database::Database;
 use crate::provides::ProvidesManager;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 
 // Dependency resolver with topological sorting
 pub struct DependencyResolver {
@@ -150,7 +150,7 @@ impl DependencyResolver {
         &self,
         packages: &HashMap<String, PackageInfo>,
     ) -> Result<(), String> {
-        for (pkg_name, pkg_info) in packages {
+        for (pkg_name, _pkg_info) in packages {
             let mut visited = HashSet::new();
             let mut stack = Vec::new();
             

@@ -1,8 +1,10 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::Write;
-use std::path::Path;
+use std::fs;
+use serde::{Deserialize, Serialize};
+use sha2::{Sha256, Digest};
 
-use crate::adapters::{detect_package_type, PackageAdapter, PackageType};
+use crate::adapters::{detect_package_type, PackageType};
 use crate::database::Database;
 use crate::download::DownloadManager;
 use crate::provides::ProvidesManager;
@@ -10,10 +12,26 @@ use crate::repository::{create_client_from_settings, PackageEntry};
 use crate::resolver::{DependencyResolver, PackageInfo};
 use crate::store::PackageStore;
 use crate::symlinks::SymlinkManager;
-use crate::verify::{verify_package, VerifyOptions, verify_with_options};
+use crate::verify::verify_package;
 use crate::{Command, PostAction, StateBox};
 use nix::unistd;
 use settings::get_settings;
+
+/// Package metadata for local packages
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LocalPackageMetadata {
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    pub arch: Vec<String>,
+    pub dependencies: Vec<String>,
+    pub runtime_dependencies: Vec<String>,
+    pub provides: Vec<String>,
+    pub conflicts: Vec<String>,
+    pub install_script: Option<String>,
+    pub uninstall_script: Option<String>,
+    pub files: Vec<String>,
+}
 
 pub fn build(hierarchy: &[String]) -> Command {
     Command::new(
@@ -91,18 +109,64 @@ fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
     let mut packages_to_install = HashMap::new();
     
     for pkg_name in args {
-        match repo_client.search_package(pkg_name) {
-            Ok(Some((source, pkg_entry))) => {
-                println!("Found {} (version {}) in {}", pkg_name, pkg_entry.version, source);
-                packages_to_install.insert(pkg_name.clone(), (source, pkg_entry));
-            }
-            Ok(None) => {
-                println!("Package not found: {}", pkg_name);
-                return PostAction::Return;
-            }
-            Err(e) => {
-                println!("Error searching for {}: {}", pkg_name, e);
-                return PostAction::Return;
+        // Check if this is a local file path
+        if std::path::Path::new(pkg_name).exists() {
+            
+            // Extract package metadata to get package info
+            let metadata = match extract_package_metadata(pkg_name) {
+                Ok(m) => m,
+                Err(e) => {
+                    println!("Failed to read package metadata: {}", e);
+                    return PostAction::Return;
+                }
+            };
+            
+            // Create a PackageEntry from the metadata
+            let hash = match calculate_file_hash(pkg_name) {
+                Ok(h) => h,
+                Err(e) => {
+                    println!("Failed to calculate hash: {}", e);
+                    return PostAction::Return;
+                }
+            };
+            
+            let canonical_path = match std::fs::canonicalize(pkg_name) {
+                Ok(p) => p,
+                Err(e) => {
+                    println!("Failed to canonicalize path: {}", e);
+                    return PostAction::Return;
+                }
+            };
+            
+            let pkg_entry = PackageEntry {
+                name: metadata.name.clone(),
+                version: metadata.version.clone(),
+                description: metadata.description.clone(),
+                hash,
+                download_url: format!("file://{}", canonical_path.display()),
+                signature_url: String::new(), // No signature for local files
+                dependencies: metadata.dependencies.clone(),
+                provides: metadata.provides.clone(),
+                runtime_dependencies: metadata.runtime_dependencies.clone(),
+                size: 0, // Will be calculated during extraction
+            };
+            
+            packages_to_install.insert(metadata.name.clone(), ("local".to_string(), pkg_entry));
+        } else {
+            // Search in repositories
+            match repo_client.search_package(pkg_name) {
+                Ok(Some((source, pkg_entry))) => {
+                    println!("Found {} (version {}) in {}", pkg_name, pkg_entry.version, source);
+                    packages_to_install.insert(pkg_name.clone(), (source, pkg_entry));
+                }
+                Ok(None) => {
+                    println!("Package not found: {}", pkg_name);
+                    return PostAction::Return;
+                }
+                Err(e) => {
+                    println!("Error searching for {}: {}", pkg_name, e);
+                    return PostAction::Return;
+                }
             }
         }
     }
@@ -187,7 +251,7 @@ fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
 fn install_package(
     pkg_name: &str,
     packages: &HashMap<String, (String, PackageEntry)>,
-    repo_client: &crate::repository::RepositoryClient,
+    _repo_client: &crate::repository::RepositoryClient,
     downloader: &DownloadManager,
     store: &PackageStore,
     db: &Database,
@@ -212,27 +276,39 @@ fn install_package(
 
     println!("\nInstalling {}...", pkg_name);
 
-    // Download package
-    let pkg_path = downloader.download_package(
-        &entry.download_url,
-        pkg_name,
-        &entry.version,
-    )?;
+    // Handle local vs remote packages
+    let pkg_path = if source == "local" {
+        // Local package - extract path from file:// URL
+        let path = entry.download_url.strip_prefix("file://")
+            .ok_or_else(|| "Invalid local package URL".to_string())?;
+        println!("Using local package: {}", path);
+        std::path::PathBuf::from(path)
+    } else {
+        // Download package from repository
+        println!("Downloading {} from {}...", pkg_name, entry.download_url);
+        let pkg_path = downloader.download_package(
+            &entry.download_url,
+            pkg_name,
+            &entry.version,
+        )?;
 
-    // Download signature
-    let sig_path = downloader.download_signature(
-        &entry.signature_url,
-        pkg_name,
-        &entry.version,
-    )?;
+        // Download signature
+        let sig_path = downloader.download_signature(
+            &entry.signature_url,
+            pkg_name,
+            &entry.version,
+        )?;
 
-    // Verify package
-    println!("Verifying package...");
-    let verify_result = verify_package(&pkg_path, &sig_path, &entry.hash)?;
-    
-    if !verify_result.is_valid() {
-        return Err(format!("Verification failed: {}", verify_result.error_message()));
-    }
+        // Verify package
+        println!("Verifying package...");
+        let verify_result = verify_package(&pkg_path, &sig_path, &entry.hash)?;
+        
+        if !verify_result.is_valid() {
+            return Err(format!("Verification failed: {}", verify_result.error_message()));
+        }
+        
+        pkg_path
+    };
 
     // Extract to store
     println!("Extracting package...");
@@ -300,4 +376,74 @@ fn install_package(
     println!("  {} installed successfully", pkg_name);
 
     Ok(())
+}
+
+/// Extract metadata from a local .pax package
+fn extract_package_metadata(package_path: &str) -> Result<LocalPackageMetadata, String> {
+    use tempfile::TempDir;
+    use std::process::Command;
+    
+    let temp_dir = TempDir::new()
+        .map_err(|e| format!("Failed to create temp directory: {}", e))?;
+    
+    let extract_dir = temp_dir.path().join("extract");
+    fs::create_dir_all(&extract_dir)
+        .map_err(|e| format!("Failed to create extract directory: {}", e))?;
+    
+    // Decompress and extract the package
+    let zstd_output = Command::new("zstd")
+        .arg("-dc")
+        .arg(package_path)
+        .output()
+        .map_err(|e| format!("Failed to decompress package: {}", e))?;
+    
+    if !zstd_output.status.success() {
+        return Err("Failed to decompress package".to_string());
+    }
+    
+    let mut tar_process = Command::new("tar")
+        .arg("-xf")
+        .arg("-")
+        .arg("-C")
+        .arg(&extract_dir)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to start tar process: {}", e))?;
+    
+    if let Some(stdin) = tar_process.stdin.take() {
+        std::io::Write::write_all(&mut std::io::BufWriter::new(stdin), &zstd_output.stdout)
+            .map_err(|e| format!("Failed to write to tar stdin: {}", e))?;
+    }
+    
+    let tar_output = tar_process.wait_with_output()
+        .map_err(|e| format!("Failed to wait for tar process: {}", e))?;
+    
+    if !tar_output.status.success() {
+        return Err("Failed to extract package".to_string());
+    }
+    
+    // Read metadata.yaml
+    let metadata_path = extract_dir.join("metadata.yaml");
+    if !metadata_path.exists() {
+        return Err("metadata.yaml not found in package".to_string());
+    }
+    
+    let metadata_content = fs::read_to_string(&metadata_path)
+        .map_err(|e| format!("Failed to read metadata.yaml: {}", e))?;
+    
+    serde_yaml::from_str(&metadata_content)
+        .map_err(|e| format!("Failed to parse metadata: {}", e))
+}
+
+/// Calculate SHA256 hash of a file
+fn calculate_file_hash(file_path: &str) -> Result<String, String> {
+    let mut file = fs::File::open(file_path)
+        .map_err(|e| format!("Failed to open file: {}", e))?;
+    
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)
+        .map_err(|e| format!("Failed to read file: {}", e))?;
+    
+    let hash = hasher.finalize();
+    Ok(format!("{:x}", hash))
 }

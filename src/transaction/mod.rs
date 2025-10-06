@@ -2,7 +2,6 @@ use crate::database::Database;
 use crate::logging::Logger;
 use crate::store::PackageStore;
 use crate::symlinks::SymlinkManager;
-use std::collections::HashMap;
 
 // Transaction state for rollback capability
 pub struct Transaction {
@@ -90,9 +89,9 @@ impl Transaction {
     // Rollback the transaction
     pub fn rollback(
         &mut self,
-        db: &Database,
+        _db: &Database,
         store: &PackageStore,
-        symlink_mgr: &SymlinkManager,
+        _symlink_mgr: &SymlinkManager,
     ) -> Result<(), String> {
         if self.committed {
             return Ok(()); // already committed, nothing to rollback
@@ -197,7 +196,7 @@ impl InstallTransaction {
         symlink_mgr: &SymlinkManager,
     ) -> Result<(), String> {
         // If we have a package ID, remove it from the database
-        if let Some(pkg_id) = self.package_id {
+        if let Some(_pkg_id) = self.package_id {
             if let Err(e) = db.remove_package(&self.package_name) {
                 self.transaction.logger.error(&format!(
                     "Failed to remove package from database during rollback: {}",
@@ -238,7 +237,7 @@ impl RemovalTransaction {
     }
 
     // Rollback removal would restore from backup
-    pub fn rollback(mut self) -> Result<(), String> {
+    pub fn rollback(self) -> Result<(), String> {
         if self.backup_created {
             self.transaction.logger.info(&format!(
                 "Would restore backup for {} (not implemented)",

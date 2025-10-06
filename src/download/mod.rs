@@ -2,7 +2,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::blocking::Client;
 use std::fs::{self, File};
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 const CACHE_DIR: &str = "/var/cache/pax";
@@ -184,12 +184,12 @@ impl DownloadManager {
     }
 
     // Remove old cached files
-    pub fn clean_old_cache(&self, keep_latest: usize) -> Result<Vec<String>, String> {
+    pub fn clean_old_cache(&self, _keep_latest: usize) -> Result<Vec<String>, String> {
         // Group files by package name
         // Keep only the latest N versions of each package
         // This is simplified - in production would parse versions properly
         
-        let mut removed = Vec::new();
+        let removed = Vec::new();
         
         // todo: implement smart cache cleaning
         

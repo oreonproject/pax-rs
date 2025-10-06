@@ -156,7 +156,7 @@ fn update_package(
         .map_err(|e| format!("Failed to get package info: {}", e))?
         .ok_or_else(|| format!("Package not found: {}", pkg_name))?;
 
-    let pkg_id = db.get_package_id(pkg_name)
+    let _pkg_id = db.get_package_id(pkg_name)
         .map_err(|e| format!("Failed to get package ID: {}", e))?
         .ok_or_else(|| format!("Package not found: {}", pkg_name))?;
 

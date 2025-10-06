@@ -161,15 +161,17 @@ the compile command:
 
 you can create a `.paxmeta` file to control how things build:
 
-```json
-{
-  "name": "myapp",
-  "version": "1.0.0",
-  "description": "My custom application",
-  "source": "https://github.com/user/myapp/archive/v1.0.0.tar.gz",
-  "dependencies": ["libncurses>=6.0"],
-  "build": "./configure --prefix=/usr && make -j$(nproc) && make install DESTDIR=$PAX_BUILD_ROOT"
-}
+```yaml
+name: myapp
+version: 1.0.0
+description: My custom application
+source: https://github.com/user/myapp/archive/v1.0.0.tar.gz
+dependencies:
+  - libncurses>=6.0
+build: |
+  ./configure --prefix=/usr
+  make -j$(nproc)
+  make install DESTDIR=$PAX_BUILD_ROOT
 ```
 
 this is useful for:

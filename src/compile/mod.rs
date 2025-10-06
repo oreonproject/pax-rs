@@ -4,6 +4,7 @@ use crate::store::PackageStore;
 use crate::symlinks::SymlinkManager;
 use crate::crypto::calculate_sha256;
 use serde::{Deserialize, Serialize};
+use serde_yaml;
 use std::fs;
 use std::process::Command as ProcessCommand;
 use nix::unistd;
@@ -128,7 +129,7 @@ fn load_recipe_from_file(path: &str) -> Result<BuildRecipe, String> {
     let contents = fs::read_to_string(path)
         .map_err(|e| format!("Failed to read file: {}", e))?;
     
-    let recipe: BuildRecipe = serde_json::from_str(&contents)
+    let recipe: BuildRecipe = serde_yaml::from_str(&contents)
         .map_err(|e| format!("Failed to parse .paxmeta: {}", e))?;
     
     Ok(recipe)
@@ -147,7 +148,7 @@ fn download_and_load_recipe(url: &str) -> Result<BuildRecipe, String> {
     let contents = response.text()
         .map_err(|e| format!("Failed to read response: {}", e))?;
     
-    let recipe: BuildRecipe = serde_json::from_str(&contents)
+    let recipe: BuildRecipe = serde_yaml::from_str(&contents)
         .map_err(|e| format!("Failed to parse .paxmeta: {}", e))?;
     
     Ok(recipe)

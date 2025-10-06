@@ -64,7 +64,9 @@ impl RepositoryClient {
                             .collect();
                         
                         if !mirrors.is_empty() {
-                            println!("Found {} mirrors from mirrorlist", mirrors.len());
+                            if mirrors.is_empty() {
+                                println!("Warning: No mirrors found in mirrorlist");
+                            }
                             expanded.extend(mirrors);
                             continue;
                         }

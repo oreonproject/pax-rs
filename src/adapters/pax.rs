@@ -1,5 +1,6 @@
 use super::*;
 use serde::{Deserialize, Serialize};
+use serde_yaml;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -91,7 +92,7 @@ impl PaxAdapter {
                 entry.read_to_string(&mut contents)
                     .map_err(|e| format!("Failed to read metadata: {}", e))?;
                 
-                let metadata: PaxMetadata = serde_json::from_str(&contents)
+                let metadata: PaxMetadata = serde_yaml::from_str(&contents)
                     .map_err(|e| format!("Failed to parse metadata: {}", e))?;
                 
                 self.metadata = Some(metadata);
