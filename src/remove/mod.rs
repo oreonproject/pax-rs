@@ -89,7 +89,16 @@ fn run(states: &StateBox, args: Option<&[String]>) -> PostAction {
                     };
                 }
             }
-            //
+            for package in metadatas.remove {
+                match package.remove_version() {
+                    Ok(()) => (),
+                    Err(message) => {
+                        println!("Operation failed!\nReported Error: \"{message}\"");
+                        println!("\x1B[91m=== YOU MAY HAVE BROKEN PACKAGES! ===\x1B[0m");
+                        return PostAction::Return;
+                    }
+                };
+            }
         }
         Err(fault) => {
             println!("\x1B[2K\r{fault}");

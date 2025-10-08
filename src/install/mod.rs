@@ -58,7 +58,7 @@ fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
                             },
                             Err(message) => {
                                 println!(
-                                    "Error installing package {name}!\nReported error: `{message}`",
+                                    "Error installing package {name}!\nReported error: \"{message}\"",
                                 );
                                 return PostAction::Return;
                             }

@@ -86,7 +86,7 @@ async fn get_deps(
     let mut deps = Vec::new();
     let mut children = Vec::new();
     for metadata in metadatas {
-        children.push(get_dep(metadata, sources));
+        children.push(metadata.get_dep(sources));
     }
     let count = children.len();
     for (i, child) in children.into_iter().enumerate() {
@@ -98,33 +98,6 @@ async fn get_deps(
         }
     }
     print!("\rCollecting dependencies... Done!");
-    Ok(deps)
-}
-
-async fn get_dep(
-    metadata: &ProcessedMetaData,
-    sources: &[String],
-) -> Result<Vec<ProcessedMetaData>, String> {
-    let mut deps = Vec::new();
-    // These are important to the build process, so they need to be installed prior to
-    // installing the dependant, so they get pushed lower down the dependency Vec
-    // (lower means it will get installed earlier).
-    for dep in &metadata.dependencies {
-        if let PseudoProcessed::MetaData(metadata) = dep.to_processed(sources).await? {
-            if let Some(i) = deps.iter().position(|x| *x == *metadata) {
-                deps.remove(i);
-            }
-            deps.push(*metadata);
-        }
-    }
-    // The dependant can still be built without this dependency, so order doesn't matter.
-    for dep in &metadata.runtime_dependencies {
-        if let PseudoProcessed::MetaData(metadata) = dep.to_processed(sources).await?
-            && !deps.contains(&metadata)
-        {
-            deps.push(*metadata);
-        }
-    }
     Ok(deps)
 }
 
@@ -218,6 +191,7 @@ impl ProcessedMetaData {
             data
         } else {
             InstalledMetaData {
+                locked: false,
                 name: name.clone(),
                 installed: Vec::new(),
             }
@@ -240,6 +214,29 @@ impl ProcessedMetaData {
             None => return err!("Failed to reserve a file for {name}!"),
         };
         Ok(Some(tmpfile))
+    }
+    pub async fn get_dep(&self, sources: &[String]) -> Result<Vec<ProcessedMetaData>, String> {
+        let mut deps = Vec::new();
+        // These are important to the build process, so they need to be installed prior to
+        // installing the dependant, so they get pushed lower down the dependency Vec
+        // (lower means it will get installed earlier).
+        for dep in &self.dependencies {
+            if let PseudoProcessed::MetaData(metadata) = dep.to_processed(sources).await? {
+                if let Some(i) = deps.iter().position(|x| *x == *metadata) {
+                    deps.remove(i);
+                }
+                deps.push(*metadata);
+            }
+        }
+        // The dependant can still be built without this dependency, so order doesn't matter.
+        for dep in &self.runtime_dependencies {
+            if let PseudoProcessed::MetaData(metadata) = dep.to_processed(sources).await?
+                && !deps.contains(&metadata)
+            {
+                deps.push(*metadata);
+            }
+        }
+        Ok(deps)
     }
 }
 
@@ -425,11 +422,108 @@ impl Specific {
             err!("`{}` didn't contain version {}!", self.name, self.version)
         }
     }
+    pub fn remove_version(&self) -> Result<(), String> {
+        println!("Removing {} version {}...", self.name, self.version);
+        let (path, data) = get_metadata_path(&self.name)?;
+        let data = if let Some(data) = data {
+            data
+        } else {
+            // Since packages are interlinked, chances are another package
+            // has already removed this one, and therefore we are just holding
+            // a stale package `Specific`!
+            println!("\x1B[33m[WARN] Skipping `{}`\x1B[0m...", self.name);
+            return Ok(());
+        };
+        let mut data = if let Some(data) = data.lock(&path, &self.name)? {
+            data
+        } else {
+            return Ok(());
+        };
+        let (index, child) = match data
+            .installed
+            .iter_mut()
+            .enumerate()
+            .find(|x| x.1.version == self.version)
+        {
+            Some(data) => data,
+            None => {
+                // Same as above.
+                println!(
+                    "\x1B[33m[WARN] Skipping `{}` version {}\x1B[0m...",
+                    self.name, self.version
+                );
+                return Ok(());
+            }
+        };
+        for dependency in &child.dependencies {
+            dependency.forget_dependent(self)?;
+        }
+        for dependent in &child.dependents {
+            dependent.remove_version()?;
+        }
+        // run uninstall thingy!
+        data.installed.remove(index);
+        data.locked = false;
+        data.write(&path)?;
+        Ok(())
+    }
+    fn forget_dependent(&self, other: &Self) -> Result<(), String> {
+        let (path, data) = get_metadata_path(&self.name)?;
+        let data = if let Some(data) = data {
+            data
+        } else {
+            // Something
+            println!("\x1B[33m[WARN] Skipping `{}`\x1B[0m...", self.name);
+            return Ok(());
+        };
+        let mut data = if let Some(data) = data.lock(&path, &self.name)? {
+            data
+        } else {
+            return Ok(());
+        };
+        let (data_index, child) = match data
+            .installed
+            .iter_mut()
+            .enumerate()
+            .find(|x| x.1.version == self.version)
+        {
+            Some(data) => data,
+            None => {
+                return err!(
+                    "Failed to remove `{}`'s dependent {}!",
+                    self.name,
+                    other.name
+                );
+            }
+        };
+        let child_index = match child
+            .dependents
+            .iter()
+            .position(|x| x.name == other.name && x.version == other.version)
+        {
+            Some(index) => index,
+            None => {
+                return err!(
+                    "Could'nt locate dependent `{}`s in {}!",
+                    other.name,
+                    self.name
+                );
+            }
+        };
+        child.dependents.remove(child_index);
+        if child.dependents.is_empty() {
+            data.installed.remove(data_index);
+        }
+        data.locked = false;
+        data.write(&path)?;
+        Ok(())
+    }
 }
 
 #[derive(PartialEq, Deserialize, Serialize, Debug)]
 
 struct InstalledMetaData {
+    locked: bool,
     name: String,
     installed: Vec<InstalledVersion>,
 }
@@ -477,6 +571,29 @@ impl InstalledMetaData {
             }
         } else {
             err!("File is of unexpected type!")
+        }
+    }
+
+    pub fn lock(mut self, path: &Path, name: &str) -> Result<Option<Self>, String> {
+        if self.locked {
+            println!(
+                "\x1B[33m[WARN] Package `{}` is busy!\x1B[0m Skipping...",
+                self.name
+            );
+            return Ok(None);
+        }
+        self.locked = true;
+        if let Some(data) = self.write(path)? {
+            Ok(Some(data))
+        } else {
+            println!(
+                "\x1B[33m[WARN] Skipping `{}` as it has no dependencies.\x1B[0m",
+                name
+            );
+            println!(
+                "\x1B[91m=== THIS IS UNEXPECTED BEHAVIOR, AND USUALLY INDICATES BROKEN PACKAGES! ===\x1B[0m..."
+            );
+            Ok(None)
         }
     }
 }
@@ -598,6 +715,7 @@ impl RawPax {
         })
     }
 }
+
 fn get_metadata_path(name: &str) -> Result<(PathBuf, Option<InstalledMetaData>), String> {
     let mut path = get_metadata_dir()?;
     path.push(format!("{name}.yaml"));
