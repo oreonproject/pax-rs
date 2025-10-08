@@ -3,6 +3,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
 
+/// Get the system's architecture
+pub fn get_system_arch() -> String {
+    std::env::consts::ARCH.to_string()
+}
+
 // Repository metadata structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepositoryIndex {
@@ -125,11 +130,17 @@ impl RepositoryClient {
     // Search for a package across all repositories (tries all repos for fallback)
     pub fn search_package(&self, name: &str) -> Result<Option<(String, PackageEntry)>, String> {
         let indexes = self.fetch_all_indexes();
+        let system_arch = get_system_arch();
 
         // Try each repository in order, fallback to next if not found
         for (source, index) in indexes {
-            for package in index.packages {
+            for mut package in index.packages {
                 if package.name == name {
+                    // Update download_url to include architecture in format: name-version-arch.pax
+                    package.download_url = format!("{}/packages/{}-{}-{}.pax", 
+                        source, package.name, package.version, system_arch);
+                    package.signature_url = format!("{}/packages/{}-{}-{}.pax.sig", 
+                        source, package.name, package.version, system_arch);
                     return Ok(Some((source, package)));
                 }
             }
@@ -141,10 +152,16 @@ impl RepositoryClient {
     // Search for a package with specific version, tries all repos
     pub fn search_package_version(&self, name: &str, version: &str) -> Result<Option<(String, PackageEntry)>, String> {
         let indexes = self.fetch_all_indexes();
+        let system_arch = get_system_arch();
 
         for (source, index) in indexes {
-            for package in index.packages {
+            for mut package in index.packages {
                 if package.name == name && package.version == version {
+                    // Update download_url to include architecture in format: name-version-arch.pax
+                    package.download_url = format!("{}/packages/{}-{}-{}.pax", 
+                        source, package.name, package.version, system_arch);
+                    package.signature_url = format!("{}/packages/{}-{}-{}.pax.sig", 
+                        source, package.name, package.version, system_arch);
                     return Ok(Some((source, package)));
                 }
             }
