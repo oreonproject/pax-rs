@@ -2,6 +2,7 @@ use crate::database::Database;
 use crate::repository::create_client_from_settings;
 use crate::{Command, PostAction, StateBox};
 use settings::{get_settings, get_settings_or_local};
+use std::collections::HashMap;
 
 pub fn build(hierarchy: &[String]) -> Command {
     Command::new(
@@ -38,43 +39,90 @@ fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
     };
 
     // initialize repository client (if sources are configured)
-    if settings.sources.is_empty() {
+    let repo_client = if settings.sources.is_empty() {
         println!("No repository sources configured. Search only available for installed packages.");
-        // Continue to search only in local database
+        None
     } else {
-        let repo_client = match create_client_from_settings(&settings) {
-            Ok(c) => c,
+        match create_client_from_settings(&settings) {
+            Ok(c) => {
+                println!("Searching repositories for '{}'...", pattern);
+
+                // Search in repositories first
+                match c.search_package(pattern) {
+                    Ok(Some((source, pkg_entry))) => {
+                        println!("Found in repository:");
+                        println!("  {} (version {}) from {}", pkg_entry.name, pkg_entry.version, source);
+                        println!("  {}", pkg_entry.description);
+                        println!();
+                    }
+                    Ok(None) => {
+                        println!("No packages found in repositories matching '{}'", pattern);
+                        println!();
+                    }
+                    Err(e) => {
+                        println!("Error searching repositories: {}", e);
+                        println!();
+                    }
+                }
+                Some(c)
+            }
             Err(e) => {
                 println!("Failed to create repository client: {}", e);
-                return PostAction::Return;
-            }
-        };
-
-        // Search in repositories
-        println!("Searching repositories for '{}'...", pattern);
-        match repo_client.search_package(pattern) {
-            Ok(Some((source, pkg_entry))) => {
-                println!("Found in repository:");
-                println!("  {} (version {}) from {}", pkg_entry.name, pkg_entry.version, source);
-                println!("  {}", pkg_entry.description);
-            }
-            Ok(None) => {
-                println!("No packages found in repositories matching '{}'", pattern);
-            }
-            Err(e) => {
-                println!("Error searching repositories: {}", e);
-                return PostAction::Return;
+                println!();
+                None
             }
         }
-    }
+    };
 
     // open database to check installed status
     let db = Database::open("/opt/pax/db/pax.db").ok();
 
     println!("Searching for '{}'...\n", pattern);
 
-    let results = repo_client.search_pattern(pattern);
+    // Search using repo_client if available, otherwise just search locally
+    let results = if let Some(ref client) = repo_client {
+        client.search_pattern(pattern)
+    } else {
+        // No repositories configured, return empty results for repository search
+        // The local database search will happen below
+        std::collections::HashMap::new()
+    };
 
+    // If no repositories configured, search only local database
+    if repo_client.is_none() {
+        if let Some(ref db) = db {
+            // Search local database for packages matching pattern
+            let local_packages = db.list_packages().unwrap_or_default();
+            let matching_packages: Vec<_> = local_packages
+                .into_iter()
+                .filter(|pkg| pkg.name.contains(pattern) || pkg.description.contains(pattern))
+                .collect();
+
+            if matching_packages.is_empty() {
+                println!("No packages found matching '{}'", pattern);
+                return PostAction::Return;
+            }
+
+            println!("Found {} package(s)", matching_packages.len());
+            for pkg in matching_packages {
+                println!("  \x1B[33m{}\x1B[0m {}", pkg.name, pkg.version);
+                if !pkg.description.is_empty() {
+                    let desc = if pkg.description.len() > 70 {
+                        format!("{}...", &pkg.description[..67])
+                    } else {
+                        pkg.description.clone()
+                    };
+                    println!("    {}", desc);
+                }
+                println!();
+            }
+        } else {
+            println!("No packages found matching '{}' (database not available)", pattern);
+        }
+        return PostAction::Return;
+    }
+
+    // Process repository search results
     if results.is_empty() {
         println!("No packages found matching '{}'", pattern);
         return PostAction::Return;
@@ -83,10 +131,10 @@ fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
     let mut total_found = 0;
     for (source, packages) in results {
         println!("\x1B[36m{}:\x1B[0m", source);
-        
+
         for pkg in packages {
             total_found += 1;
-            
+
             // check if installed
             let installed = if let Some(ref db) = db {
                 db.is_installed(&pkg.name).unwrap_or(false)
@@ -101,14 +149,14 @@ fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
             };
 
             println!("  \x1B[33m{}\x1B[0m {} {}", pkg.name, pkg.version, status);
-            
+
             // truncate long descriptions
             let desc = if pkg.description.len() > 70 {
                 format!("{}...", &pkg.description[..67])
             } else {
                 pkg.description.clone()
             };
-            
+
             println!("    {}", desc);
         }
         println!();
