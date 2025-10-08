@@ -48,32 +48,42 @@ fn default_verify_signatures() -> bool {
 }
 
 pub fn get_settings() -> Result<SettingsYaml, String> {
-    // Try to read existing settings
-    if let Ok(mut file) = affirm_path() {
-        let mut contents = String::new();
-        if file.read_to_string(&mut contents).is_ok() {
-            if let Ok(settings) = serde_norway::from_str(&contents) {
-                return Ok(settings);
-            }
-        }
+    // Try to auto-initialize from existing settings files first
+    if let Ok(settings) = auto_initialize_settings() {
+        return Ok(settings);
     }
 
-    // If settings don't exist, try to auto-initialize from system endpoints
-    auto_initialize_settings()
+    // If no settings exist, create a new one and initialize it
+    let mut file = affirm_path()?;
+    let settings = SettingsYaml {
+        sources: vec!["http://localhost:8080".to_string()],
+        db_path: default_db_path(),
+        store_path: default_store_path(),
+        cache_path: default_cache_path(),
+        links_path: default_links_path(),
+        parallel_downloads: default_parallel_downloads(),
+        verify_signatures: default_verify_signatures(),
+    };
+
+    let settings_content = match serde_norway::to_string(&settings) {
+        Ok(content) => content,
+        Err(_) => return Err(String::from("Failed to serialize default settings!")),
+    };
+
+    if file.write_all(settings_content.as_bytes()).is_err() {
+        return Err(String::from("Failed to write default settings!"));
+    }
+
+    Ok(settings)
 }
 
 pub fn get_settings_or_local() -> Result<SettingsYaml, String> {
-    // Try to read existing settings
-    if let Ok(mut file) = affirm_path() {
-        let mut contents = String::new();
-        if file.read_to_string(&mut contents).is_ok() {
-            if let Ok(settings) = serde_norway::from_str(&contents) {
-                return Ok(settings);
-            }
-        }
+    // Try to get settings normally first
+    if let Ok(settings) = get_settings() {
+        return Ok(settings);
     }
 
-    // If settings don't exist, return local-only settings
+    // If no settings exist, return local-only settings
     Ok(SettingsYaml {
         sources: Vec::new(),
         db_path: default_db_path(),
@@ -86,41 +96,33 @@ pub fn get_settings_or_local() -> Result<SettingsYaml, String> {
 }
 
 fn auto_initialize_settings() -> Result<SettingsYaml, String> {
-    // Look for system endpoints file
-    let endpoints_locations = [
-        "/etc/pax/endpoints.txt",
-        "/usr/share/pax/endpoints.txt",
-        "/etc/oreon/pax-endpoints.txt",
+    // Try to read existing settings.yml from multiple locations
+    // Check user location first (for development), then system location
+    let settings_locations = [
+        "/tmp/pax/settings.yaml",
+        "/etc/pax/settings.yaml",
     ];
-    
-    for location in &endpoints_locations {
-        if let Ok(contents) = std::fs::read_to_string(location) {
-            let sources: Vec<String> = contents
-                .lines()
-                .filter(|line| !line.trim().is_empty() && !line.trim().starts_with('#'))
-                .map(|line| line.trim().to_string())
-                .collect();
-            
-            if !sources.is_empty() {
-                let settings = SettingsYaml {
-                    sources,
-                    db_path: default_db_path(),
-                    store_path: default_store_path(),
-                    cache_path: default_cache_path(),
-                    links_path: default_links_path(),
-                    parallel_downloads: default_parallel_downloads(),
-                    verify_signatures: default_verify_signatures(),
-                };
-                
-                // Try to save settings for next time
-                let _ = set_settings(settings.clone());
-                
-                return Ok(settings);
+
+    for location in &settings_locations {
+        if let Ok(mut file) = File::open(location) {
+            let mut contents = String::new();
+            if file.read_to_string(&mut contents).is_ok() && !contents.trim().is_empty() {
+                if let Ok(settings) = serde_norway::from_str::<SettingsYaml>(&contents) {
+                    // Only return settings if they have valid sources AND other required fields
+                    if !settings.sources.is_empty() && !settings.db_path.is_empty() && !settings.store_path.is_empty() {
+                        return Ok(settings);
+                    }
+                } else {
+                    // If YAML parsing fails, try the next location
+                    continue;
+                }
             }
         }
     }
-    
-    Err(String::from("No repository endpoints found. Please create /etc/pax/endpoints.txt with repository URLs"))
+
+    // If no settings.yml found, return error - user should run 'pax init'
+
+    Err(String::from("No repository endpoints found. Please run 'pax init' to initialize pax with default settings"))
 }
 
 pub fn set_settings(settings: SettingsYaml) -> Result<(), String> {
@@ -136,18 +138,25 @@ pub fn set_settings(settings: SettingsYaml) -> Result<(), String> {
 }
 
 fn affirm_path() -> Result<File, String> {
+    // Try system path first
     let mut path = PathBuf::from("/etc/pax");
-    if !path.exists() && DirBuilder::new().create(&path).is_err() {
-        return Err(String::from("Failed to create pax directory!"));
+    if path.exists() || DirBuilder::new().create(&path).is_ok() {
+        path.push("settings.yaml");
+        if path.is_file() || !path.exists() {
+            if let Ok(file) = File::create(&path) {
+                return Ok(file);
+            }
+        }
     }
-    path.push("settings.yaml");
-    if path.is_file() || !path.exists() {
-        let file = match File::create(path) {
-            Ok(file) => file,
-            Err(_) => return Err(String::from("Failed to create settings file!")),
-        };
-        Ok(file)
-    } else {
-        Err(String::from("Settings file is of unexpected type!"))
+
+    // Fall back to user path for development
+    let mut user_path = PathBuf::from("/tmp/pax");
+    if user_path.exists() || DirBuilder::new().create(&user_path).is_ok() {
+        user_path.push("settings.yaml");
+        if let Ok(file) = File::create(&user_path) {
+            return Ok(file);
+        }
     }
+
+    Err(String::from("Failed to create settings file in any location!"))
 }

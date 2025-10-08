@@ -1,12 +1,10 @@
 use std::fs;
-use std::fs::File;
-use std::io::Write;
-use std::path::Path;
 
 use crate::{Command, PostAction, StateBox};
 
-const PATH: &str = "/etc/pax/endpoints.txt";
-const URL: &str = "http:localhost:8000";
+const SYSTEM_SETTINGS_PATH: &str = "/etc/pax/settings.yaml";
+const USER_SETTINGS_PATH: &str = "/tmp/pax/settings.yaml";
+const URL: &str = "http://localhost:8080";
 
 pub fn build(hierarchy: &[String]) -> Command {
     Command::new(
@@ -30,38 +28,27 @@ fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
 
     println!("Initializing pax...");
 
-    // create /etc/pax if it doesn't exist
-    match fs::create_dir_all("/etc/pax"){
-        Ok(_) => (),
-        Err(e) => {
-            println!("Failed to create /etc/pax directory: {}", e);
-            return PostAction::Return;
-        }
-    }
-    
-    // create /etc/pax/endpoints.txt if it doesn't exist
-    let file: File = match fs::File::create(PATH) {
-        Ok(f) => f,
-        Err(e) => {
-            println!("Failed to create {}: {}", PATH, e);
-            return PostAction::Return;
-        }
+    // Try system paths first, fall back to user paths for development
+    let settings_path = if fs::create_dir_all("/etc/pax").is_ok() {
+        // System paths are writable, use system location
+        SYSTEM_SETTINGS_PATH
+    } else {
+        // Fall back to user paths for development
+        println!("Note: Using user-local paths for development. For system-wide installation, run with appropriate permissions.");
+        let _ = fs::create_dir_all("/tmp/pax");
+        USER_SETTINGS_PATH
     };
 
-    // write default URL to endpoints.txt
-    let mut file = file; 
-    match file.write_all(URL.as_bytes()) {
-        Ok(()) => (),
-        Err(e) => {
-            eprintln!("Failed to write {}: {}", Path::new(PATH).display(), e);
-            return PostAction::Return;
-        }
-    }
+    // Create settings.yaml with default configuration
+    let settings_content = format!(
+        "sources:\n  - {}\ndb_path: /opt/pax/db/pax.db\nstore_path: /opt/pax/store\ncache_path: /var/cache/pax\nlinks_path: /opt/pax/links\nparallel_downloads: 3\nverify_signatures: true\n",
+        URL
+    );
 
-    match file.flush() {
-        Ok(()) => (),
+    match fs::write(settings_path, settings_content) {
+        Ok(_) => (),
         Err(e) => {
-            eprintln!("Failed to flush {}: {}", Path::new(PATH).display(), e);
+            eprintln!("Failed to create {}: {}", settings_path, e);
             return PostAction::Return;
         }
     }
