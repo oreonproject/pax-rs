@@ -97,14 +97,14 @@ impl Command {
         flags.push_str(&format!("  -h, --help\thelp for {}", self.name));
 
         // Check if there are subcommands or aliases
-        if let Some(subcommands) = &self.subcommands
-            && *subcommands != Vec::new()
-        {
-            attrs.push_str(&format!("  {} [command]\n", self.name));
-            commands = String::from("\nAvailable Commands:\n");
-            for command in subcommands {
-                let command = (command)(&[]);
-                commands.push_str(&format!("  {}\t{}\n", command.name, command.about));
+        if let Some(subcommands) = &self.subcommands {
+            if !subcommands.is_empty() {
+                attrs.push_str(&format!("  {} [command]\n", self.name));
+                commands = String::from("\nAvailable Commands:\n");
+                for command in subcommands {
+                    let command = (command)(&[]);
+                    commands.push_str(&format!("  {}\t{}\n", command.name, command.about));
+                }
             }
         }
         if self.aliases != Vec::<String>::new() {

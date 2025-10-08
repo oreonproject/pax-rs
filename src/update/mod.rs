@@ -6,7 +6,7 @@ use crate::symlinks::SymlinkManager;
 use crate::verify::verify_package;
 use crate::{Command, PostAction, StateBox};
 use nix::unistd;
-use settings::{get_settings, get_settings_or_local};
+use settings::{get_settings_or_local};
 use std::collections::HashMap;
 use std::io::Write;
 

@@ -1,5 +1,5 @@
 use crate::database::Database;
-use crate::repository::create_client_from_settings;
+use crate::repository::{create_client_from_settings, RepositoryClient};
 use crate::{Command, PostAction, StateBox};
 use settings::{get_settings, get_settings_or_local};
 use std::collections::HashMap;
@@ -32,13 +32,13 @@ fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
 
     let pattern = &args[0];
 
-    // load settings - use local-only settings if endpoints.txt doesn't exist
+    // Load settings - use local-only settings if endpoints.txt doesn't exist
     let settings = match get_settings_or_local() {
         Ok(s) => s,
         Err(_) => return PostAction::Return,
     };
 
-    // initialize repository client (if sources are configured)
+    // Initialize repository client (if sources are configured)
     let repo_client = if settings.sources.is_empty() {
         println!("No repository sources configured. Search only available for installed packages.");
         None
@@ -74,7 +74,7 @@ fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
         }
     };
 
-    // open database to check installed status
+    // Open database to check installed status
     let db = Database::open("/opt/pax/db/pax.db").ok();
 
     println!("Searching for '{}'...\n", pattern);
@@ -84,7 +84,6 @@ fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
         client.search_pattern(pattern)
     } else {
         // No repositories configured, return empty results for repository search
-        // The local database search will happen below
         std::collections::HashMap::new()
     };
 
@@ -135,7 +134,7 @@ fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
         for pkg in packages {
             total_found += 1;
 
-            // check if installed
+            // Check if installed
             let installed = if let Some(ref db) = db {
                 db.is_installed(&pkg.name).unwrap_or(false)
             } else {
@@ -150,7 +149,7 @@ fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
 
             println!("  \x1B[33m{}\x1B[0m {} {}", pkg.name, pkg.version, status);
 
-            // truncate long descriptions
+            // Truncate long descriptions
             let desc = if pkg.description.len() > 70 {
                 format!("{}...", &pkg.description[..67])
             } else {
@@ -166,4 +165,3 @@ fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
 
     PostAction::Return
 }
-

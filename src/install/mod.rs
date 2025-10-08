@@ -15,7 +15,7 @@ use crate::symlinks::SymlinkManager;
 use crate::verify::verify_package;
 use crate::{Command, PostAction, StateBox};
 use nix::unistd;
-use settings::{get_settings, get_settings_or_local};
+use settings::{get_settings_or_local};
 
 /// Package metadata for local packages
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -455,7 +455,7 @@ fn extract_pax_metadata(package_path: &str) -> Result<LocalPackageMetadata, Stri
         .map_err(|e| format!("Failed to create extract directory: {}", e))?;
     
     // Decompress and extract the package
-    let zstd_output = Command::new("zstd")
+    let zstd_output = std::process::Command::new("zstd")
         .arg("-dc")
         .arg(package_path)
         .output()
@@ -465,7 +465,7 @@ fn extract_pax_metadata(package_path: &str) -> Result<LocalPackageMetadata, Stri
         return Err("Failed to decompress package".to_string());
     }
     
-    let mut tar_process = Command::new("tar")
+    let mut tar_process = std::process::Command::new("tar")
         .arg("-xf")
         .arg("-")
         .arg("-C")
@@ -513,7 +513,7 @@ fn extract_rpm_metadata(package_path: &str) -> Result<LocalPackageMetadata, Stri
     use std::process::Command;
     
     // Use rpm command to query package info
-    let name_output = Command::new("rpm")
+    let name_output = std::process::Command::new("rpm")
         .args(&["-qp", "--queryformat", "%{NAME}", package_path])
         .output()
         .map_err(|e| format!("Failed to run rpm command: {}", e))?;
@@ -524,20 +524,20 @@ fn extract_rpm_metadata(package_path: &str) -> Result<LocalPackageMetadata, Stri
     
     let name = String::from_utf8_lossy(&name_output.stdout).to_string();
     
-    let version_output = Command::new("rpm")
+    let version_output = std::process::Command::new("rpm")
         .args(&["-qp", "--queryformat", "%{VERSION}-%{RELEASE}", package_path])
         .output()
         .map_err(|e| format!("Failed to query RPM version: {}", e))?;
     let version = String::from_utf8_lossy(&version_output.stdout).to_string();
     
-    let desc_output = Command::new("rpm")
+    let desc_output = std::process::Command::new("rpm")
         .args(&["-qp", "--queryformat", "%{SUMMARY}", package_path])
         .output()
         .map_err(|e| format!("Failed to query RPM description: {}", e))?;
     let description = String::from_utf8_lossy(&desc_output.stdout).to_string();
     
     // Get dependencies
-    let deps_output = Command::new("rpm")
+    let deps_output = std::process::Command::new("rpm")
         .args(&["-qp", "--requires", package_path])
         .output()
         .map_err(|e| format!("Failed to query RPM dependencies: {}", e))?;
@@ -548,7 +548,7 @@ fn extract_rpm_metadata(package_path: &str) -> Result<LocalPackageMetadata, Stri
         .collect();
     
     // Get provides
-    let prov_output = Command::new("rpm")
+    let prov_output = std::process::Command::new("rpm")
         .args(&["-qp", "--provides", package_path])
         .output()
         .map_err(|e| format!("Failed to query RPM provides: {}", e))?;
@@ -559,7 +559,7 @@ fn extract_rpm_metadata(package_path: &str) -> Result<LocalPackageMetadata, Stri
         .collect();
     
     // Get architecture
-    let arch_output = Command::new("rpm")
+    let arch_output = std::process::Command::new("rpm")
         .args(&["-qp", "--queryformat", "%{ARCH}", package_path])
         .output()
         .map_err(|e| format!("Failed to query RPM arch: {}", e))?;
@@ -575,7 +575,7 @@ fn extract_rpm_metadata(package_path: &str) -> Result<LocalPackageMetadata, Stri
     };
     
     // Get file list
-    let files_output = Command::new("rpm")
+    let files_output = std::process::Command::new("rpm")
         .args(&["-qpl", package_path])
         .output()
         .map_err(|e| format!("Failed to query RPM files: {}", e))?;
@@ -605,7 +605,7 @@ fn extract_deb_metadata(package_path: &str) -> Result<LocalPackageMetadata, Stri
     use std::process::Command;
     
     // Use dpkg-deb to query package info
-    let info_output = Command::new("dpkg-deb")
+    let info_output = std::process::Command::new("dpkg-deb")
         .args(&["-f", package_path])
         .output()
         .map_err(|e| format!("Failed to run dpkg-deb: {}", e))?;
@@ -662,7 +662,7 @@ fn extract_deb_metadata(package_path: &str) -> Result<LocalPackageMetadata, Stri
     }
     
     // Get file list
-    let files_output = Command::new("dpkg-deb")
+    let files_output = std::process::Command::new("dpkg-deb")
         .args(&["-c", package_path])
         .output()
         .map_err(|e| format!("Failed to query DEB files: {}", e))?;
@@ -707,13 +707,13 @@ fn extract_rpm_to_store(rpm_path: &std::path::Path, hash: &str, store: &PackageS
         .map_err(|e| format!("Failed to create package directory: {}", e))?;
     
     // Extract RPM using rpm2cpio and cpio
-    let rpm2cpio = Command::new("rpm2cpio")
+    let rpm2cpio = std::process::Command::new("rpm2cpio")
         .arg(rpm_path)
         .stdout(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| format!("Failed to run rpm2cpio: {}", e))?;
     
-    let cpio = Command::new("cpio")
+    let cpio = std::process::Command::new("cpio")
         .args(&["-idm"])
         .current_dir(&dest)
         .stdin(rpm2cpio.stdout.unwrap())
@@ -737,7 +737,7 @@ fn extract_deb_to_store(deb_path: &std::path::Path, hash: &str, store: &PackageS
         .map_err(|e| format!("Failed to create package directory: {}", e))?;
     
     // Extract DEB using dpkg-deb
-    let output = Command::new("dpkg-deb")
+    let output = std::process::Command::new("dpkg-deb")
         .args(&["-x", deb_path.to_str().unwrap(), dest.to_str().unwrap()])
         .output()
         .map_err(|e| format!("Failed to run dpkg-deb: {}", e))?;
@@ -766,7 +766,7 @@ fn run_scriptlets(pkg_path: &std::path::Path, pkg_type: PackageType, stage: &str
                 _ => return Ok(()),
             };
             
-            let script_output = Command::new("rpm")
+            let script_output = std::process::Command::new("rpm")
                 .args(&["-qp", script_query, pkg_path.to_str().unwrap()])
                 .output()
                 .map_err(|e| format!("Failed to query RPM scriptlets: {}", e))?;
@@ -775,7 +775,7 @@ fn run_scriptlets(pkg_path: &std::path::Path, pkg_type: PackageType, stage: &str
                 let script = String::from_utf8_lossy(&script_output.stdout);
                 if !script.trim().is_empty() {
                     // Run scriptlet with proper environment
-                    let output = Command::new("sh")
+                    let output = std::process::Command::new("sh")
                         .arg("-c")
                         .arg(&script.to_string())
                         .env("RPM_INSTALL_PREFIX", store_path)
@@ -800,7 +800,7 @@ fn run_scriptlets(pkg_path: &std::path::Path, pkg_type: PackageType, stage: &str
             };
             
             // Extract the control archive
-            let control_output = Command::new("dpkg-deb")
+            let control_output = std::process::Command::new("dpkg-deb")
                 .args(&["--control", pkg_path.to_str().unwrap()])
                 .current_dir("/tmp")
                 .output()
@@ -809,7 +809,7 @@ fn run_scriptlets(pkg_path: &std::path::Path, pkg_type: PackageType, stage: &str
             if control_output.status.success() {
                 let script_path = format!("/tmp/DEBIAN/{}", script_name);
                 if std::path::Path::new(&script_path).exists() {
-                    let output = Command::new(&script_path)
+                    let output = std::process::Command::new(&script_path)
                         .arg("install")
                         .env("DPKG_MAINTSCRIPT_PACKAGE", pkg_id.to_string())
                         .output()
