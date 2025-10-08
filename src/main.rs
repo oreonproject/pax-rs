@@ -27,7 +27,12 @@ pub fn main() {
         Vec::new(),
         "PAX is the official package manager for Oreon 11.",
         vec![],
-        Some(vec![endpoints_init::build, install::build, remove::build]),
+        Some(vec![
+            endpoints_init::build,
+            install::build,
+            remove::build_remove,
+            remove::build_purge,
+        ]),
         |_command, _args| PostAction::GetHelp,
         &[],
     );

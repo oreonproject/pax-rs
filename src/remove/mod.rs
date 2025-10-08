@@ -5,7 +5,7 @@ use utils::{choice, is_root};
 
 use crate::{Command, PostAction, StateBox};
 
-pub fn build(hierarchy: &[String]) -> Command {
+pub fn build_remove(hierarchy: &[String]) -> Command {
     let specific = Flag::new(
         Some('s'),
         "specific",
@@ -22,12 +22,42 @@ pub fn build(hierarchy: &[String]) -> Command {
         "Removes a package, whilst maintaining any user-made configurations",
         vec![specific, utils::yes_flag()],
         None,
-        run,
+        remove,
         hierarchy,
     )
 }
 
-fn run(states: &StateBox, args: Option<&[String]>) -> PostAction {
+pub fn build_purge(hierarchy: &[String]) -> Command {
+    let specific = Flag::new(
+        Some('s'),
+        "specific",
+        "Makes every second argument the target version for the argument prior.",
+        false,
+        false,
+        |states, _| {
+            states.shove("specific", true);
+        },
+    );
+    Command::new(
+        "purge",
+        vec![String::from("r")],
+        "Removes a package, WITHOUT maintaining any user-made configurations",
+        vec![specific, utils::yes_flag()],
+        None,
+        purge,
+        hierarchy,
+    )
+}
+
+fn remove(states: &StateBox, args: Option<&[String]>) -> PostAction {
+    run(states, args, false)
+}
+
+fn purge(states: &StateBox, args: Option<&[String]>) -> PostAction {
+    run(states, args, true)
+}
+
+fn run(states: &StateBox, args: Option<&[String]>, purge: bool) -> PostAction {
     if !is_root() {
         return PostAction::Elevate;
     }
@@ -58,8 +88,9 @@ fn run(states: &StateBox, args: Option<&[String]>) -> PostAction {
             if metadatas.is_empty() {
                 return PostAction::NothingToDo;
             }
+            let msg = if purge { "PURGED: " } else { "REMOVED:" };
             println!(
-                "\nThe following packages will be REMOVED:  \x1B[91m{}\x1B[0m",
+                "\nThe following package(s) will be {msg}  \x1B[91m{}\x1B[0m",
                 metadatas
                     .remove
                     .iter()
@@ -68,7 +99,7 @@ fn run(states: &StateBox, args: Option<&[String]>) -> PostAction {
             );
             if metadatas.has_deps() {
                 println!(
-                    "The following packages will be MODIFIED: \x1B[93m{}\x1B[0m",
+                    "The following package(s) will be MODIFIED: \x1B[93m{}\x1B[0m",
                     metadatas
                         .modify
                         .iter()
@@ -90,7 +121,7 @@ fn run(states: &StateBox, args: Option<&[String]>) -> PostAction {
                 }
             }
             for package in metadatas.remove {
-                match package.remove_version() {
+                match package.remove_version(purge) {
                     Ok(()) => (),
                     Err(message) => {
                         println!("Operation failed!\nReported Error: \"{message}\"");

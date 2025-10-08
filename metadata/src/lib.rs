@@ -422,8 +422,9 @@ impl Specific {
             err!("`{}` didn't contain version {}!", self.name, self.version)
         }
     }
-    pub fn remove_version(&self) -> Result<(), String> {
-        println!("Removing {} version {}...", self.name, self.version);
+    pub fn remove_version(&self, purge: bool) -> Result<(), String> {
+        let msg = if purge { "Purging" } else { "Removing" };
+        println!("{} {} version {}...", msg, self.name, self.version);
         let (path, data) = get_metadata_path(&self.name)?;
         let data = if let Some(data) = data {
             data
@@ -459,9 +460,13 @@ impl Specific {
             dependency.forget_dependent(self)?;
         }
         for dependent in &child.dependents {
-            dependent.remove_version()?;
+            dependent.remove_version(purge)?;
         }
-        // run uninstall thingy!
+        if purge {
+            // Run purge thingy
+        } else {
+            // Run uninstall thingy
+        }
         data.installed.remove(index);
         data.locked = false;
         data.write(&path)?;
