@@ -14,6 +14,7 @@ pub mod crypto;
 pub mod database;
 pub mod download;
 pub mod info;
+pub mod init;
 pub mod install;
 pub mod list;
 pub mod lock;
@@ -50,6 +51,7 @@ pub fn main() {
         "PAX is the official package manager for Oreon 11 - A universal package manager with cross-distro support",
         Vec::new(),
         Some(vec![
+            init::build,
             install::build,
             remove::build,
             update::build,

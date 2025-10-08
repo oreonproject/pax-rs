@@ -48,9 +48,11 @@
               rustfmt
               rust-analyzer
               sccache
+              openssl
+              pkg-config
             ];
             shellHook = ''
-              pax = ./target/debug/pax
+              alias pax=./target/debug/pax
             '';
           };
         };

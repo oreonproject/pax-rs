@@ -1,7 +1,8 @@
 use crate::database::Database;
-use crate::repository::create_client_from_settings;
+use crate::repository::{create_client_from_settings, RepositoryClient};
 use crate::{Command, PostAction, StateBox};
-use settings::{get_settings, get_settings_or_local};
+use settings::{get_settings_or_local};
+use std::collections::HashMap;
 
 pub fn build(hierarchy: &[String]) -> Command {
     Command::new(
@@ -38,31 +39,34 @@ fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
     };
 
     // initialize repository client (if sources are configured)
+    let mut repo_client: Option<RepositoryClient> = None;
     if settings.sources.is_empty() {
         println!("No repository sources configured. Search only available for installed packages.");
         // Continue to search only in local database
     } else {
-        let repo_client = match create_client_from_settings(&settings) {
-            Ok(c) => c,
+        match create_client_from_settings(&settings) {
+            Ok(c) => {
+                // Search in repositories
+                println!("Searching repositories for '{}'...", pattern);
+                match c.search_package(pattern) {
+                    Ok(Some((source, pkg_entry))) => {
+                        println!("Found in repository:");
+                        println!("  {} (version {}) from {}", pkg_entry.name, pkg_entry.version, source);
+                        println!("  {}", pkg_entry.description);
+                    }
+                    Ok(None) => {
+                        println!("No packages found in repositories matching '{}'", pattern);
+                    }
+                    Err(e) => {
+                        println!("Error searching repositories: {}", e);
+                        return PostAction::Return;
+                    }
+                }
+
+                repo_client = Some(c);
+            }
             Err(e) => {
                 println!("Failed to create repository client: {}", e);
-                return PostAction::Return;
-            }
-        };
-
-        // Search in repositories
-        println!("Searching repositories for '{}'...", pattern);
-        match repo_client.search_package(pattern) {
-            Ok(Some((source, pkg_entry))) => {
-                println!("Found in repository:");
-                println!("  {} (version {}) from {}", pkg_entry.name, pkg_entry.version, source);
-                println!("  {}", pkg_entry.description);
-            }
-            Ok(None) => {
-                println!("No packages found in repositories matching '{}'", pattern);
-            }
-            Err(e) => {
-                println!("Error searching repositories: {}", e);
                 return PostAction::Return;
             }
         }
@@ -73,7 +77,11 @@ fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
 
     println!("Searching for '{}'...\n", pattern);
 
-    let results = repo_client.search_pattern(pattern);
+    let results: HashMap<String, Vec<crate::repository::PackageEntry>> = if let Some(ref rc) = repo_client {
+        rc.search_pattern(pattern)
+    } else {
+        HashMap::new()
+    };
 
     if results.is_empty() {
         println!("No packages found matching '{}'", pattern);
