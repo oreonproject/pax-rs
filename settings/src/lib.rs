@@ -57,9 +57,32 @@ pub fn get_settings() -> Result<SettingsYaml, String> {
             }
         }
     }
-    
+
     // If settings don't exist, try to auto-initialize from system endpoints
     auto_initialize_settings()
+}
+
+pub fn get_settings_or_local() -> Result<SettingsYaml, String> {
+    // Try to read existing settings
+    if let Ok(mut file) = affirm_path() {
+        let mut contents = String::new();
+        if file.read_to_string(&mut contents).is_ok() {
+            if let Ok(settings) = serde_norway::from_str(&contents) {
+                return Ok(settings);
+            }
+        }
+    }
+
+    // If settings don't exist, return local-only settings
+    Ok(SettingsYaml {
+        sources: Vec::new(),
+        db_path: default_db_path(),
+        store_path: default_store_path(),
+        cache_path: default_cache_path(),
+        links_path: default_links_path(),
+        parallel_downloads: default_parallel_downloads(),
+        verify_signatures: default_verify_signatures(),
+    })
 }
 
 fn auto_initialize_settings() -> Result<SettingsYaml, String> {

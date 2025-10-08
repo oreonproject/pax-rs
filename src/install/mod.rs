@@ -15,7 +15,7 @@ use crate::symlinks::SymlinkManager;
 use crate::verify::verify_package;
 use crate::{Command, PostAction, StateBox};
 use nix::unistd;
-use settings::get_settings;
+use settings::{get_settings, get_settings_or_local};
 
 /// Package metadata for local packages
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,10 +60,10 @@ fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
         Some(args) => args,
     };
 
-    // load settings
-    let settings = match get_settings() {
+    // load settings - use local-only settings if endpoints.txt doesn't exist
+    let settings = match get_settings_or_local() {
         Ok(s) => s,
-        Err(_) => return PostAction::PullSources,
+        Err(_) => return PostAction::Return,
     };
 
     // Initialize components
@@ -91,11 +91,16 @@ fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
         }
     };
 
-    let repo_client = match create_client_from_settings(&settings) {
-        Ok(c) => c,
-        Err(e) => {
-            println!("Failed to create repository client: {}", e);
-            return PostAction::Return;
+    let repo_client = if settings.sources.is_empty() {
+        // No repository sources configured, skip repository operations
+        None
+    } else {
+        match create_client_from_settings(&settings) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                println!("Failed to create repository client: {}", e);
+                return PostAction::Return;
+            }
         }
     };
 
@@ -174,20 +179,25 @@ fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
             
             packages_to_install.insert(metadata.name.clone(), ("local".to_string(), pkg_entry));
         } else {
-            // Search in repositories
-            match repo_client.search_package(pkg_name) {
-                Ok(Some((source, pkg_entry))) => {
-                    println!("Found {} (version {}) in {}", pkg_name, pkg_entry.version, source);
-                    packages_to_install.insert(pkg_name.clone(), (source, pkg_entry));
+            // Search in repositories (if available)
+            if let Some(ref client) = repo_client {
+                match client.search_package(pkg_name) {
+                    Ok(Some((source, pkg_entry))) => {
+                        println!("Found {} (version {}) in {}", pkg_name, pkg_entry.version, source);
+                        packages_to_install.insert(pkg_name.clone(), (source, pkg_entry));
+                    }
+                    Ok(None) => {
+                        println!("Package not found: {}", pkg_name);
+                        return PostAction::Return;
+                    }
+                    Err(e) => {
+                        println!("Error searching for {}: {}", pkg_name, e);
+                        return PostAction::Return;
+                    }
                 }
-                Ok(None) => {
-                    println!("Package not found: {}", pkg_name);
-                    return PostAction::Return;
-                }
-                Err(e) => {
-                    println!("Error searching for {}: {}", pkg_name, e);
-                    return PostAction::Return;
-                }
+            } else {
+                println!("Package not found (no repository sources configured): {}", pkg_name);
+                return PostAction::Return;
             }
         }
     }
@@ -296,7 +306,7 @@ fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
 fn install_package(
     pkg_name: &str,
     packages: &HashMap<String, (String, PackageEntry)>,
-    _repo_client: &crate::repository::RepositoryClient,
+    repo_client: &Option<crate::repository::RepositoryClient>,
     downloader: &DownloadManager,
     store: &PackageStore,
     db: &Database,
@@ -329,7 +339,11 @@ fn install_package(
         println!("Using local package: {}", path);
         std::path::PathBuf::from(path)
     } else {
-        // Download package from repository
+        // Download package from repository (only if repo_client is available)
+        if repo_client.is_none() {
+            return Err(format!("Cannot download {}: no repository sources configured", pkg_name));
+        }
+
         println!("Downloading {} from {}...", pkg_name, entry.download_url);
         let pkg_path = downloader.download_package(
             &entry.download_url,
@@ -347,11 +361,11 @@ fn install_package(
         // Verify package
         println!("Verifying package...");
         let verify_result = verify_package(&pkg_path, &sig_path, &entry.hash)?;
-        
+
         if !verify_result.is_valid() {
             return Err(format!("Verification failed: {}", verify_result.error_message()));
         }
-        
+
         pkg_path
     };
 

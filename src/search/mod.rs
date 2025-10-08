@@ -1,7 +1,7 @@
 use crate::database::Database;
 use crate::repository::create_client_from_settings;
 use crate::{Command, PostAction, StateBox};
-use settings::get_settings;
+use settings::{get_settings, get_settings_or_local};
 
 pub fn build(hierarchy: &[String]) -> Command {
     Command::new(
@@ -31,20 +31,42 @@ fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
 
     let pattern = &args[0];
 
-    // load settings
-    let settings = match get_settings() {
+    // load settings - use local-only settings if endpoints.txt doesn't exist
+    let settings = match get_settings_or_local() {
         Ok(s) => s,
-        Err(_) => return PostAction::PullSources,
+        Err(_) => return PostAction::Return,
     };
 
-    // initialize repository client
-    let repo_client = match create_client_from_settings(&settings) {
-        Ok(c) => c,
-        Err(e) => {
-            println!("Failed to create repository client: {}", e);
-            return PostAction::Return;
+    // initialize repository client (if sources are configured)
+    if settings.sources.is_empty() {
+        println!("No repository sources configured. Search only available for installed packages.");
+        // Continue to search only in local database
+    } else {
+        let repo_client = match create_client_from_settings(&settings) {
+            Ok(c) => c,
+            Err(e) => {
+                println!("Failed to create repository client: {}", e);
+                return PostAction::Return;
+            }
+        };
+
+        // Search in repositories
+        println!("Searching repositories for '{}'...", pattern);
+        match repo_client.search_package(pattern) {
+            Ok(Some((source, pkg_entry))) => {
+                println!("Found in repository:");
+                println!("  {} (version {}) from {}", pkg_entry.name, pkg_entry.version, source);
+                println!("  {}", pkg_entry.description);
+            }
+            Ok(None) => {
+                println!("No packages found in repositories matching '{}'", pattern);
+            }
+            Err(e) => {
+                println!("Error searching repositories: {}", e);
+                return PostAction::Return;
+            }
         }
-    };
+    }
 
     // open database to check installed status
     let db = Database::open("/opt/pax/db/pax.db").ok();

@@ -13,7 +13,6 @@ enum HandlerResult {
 pub enum PostAction {
     Elevate,
     GetHelp,
-    PullSources,
     Return,
 }
 
@@ -293,30 +292,6 @@ impl Command {
                 }
             }
             PostAction::GetHelp => println!("{}", self.help()),
-            PostAction::PullSources => {
-                match choice("Missing sources.txt! Try pull them now?", false) {
-                    None => println!("\nFailed to read terminal input!"),
-                    Some(true) => {
-                        let args = env::args().collect::<Vec<String>>();
-                        let mut args = args.iter();
-                        let program = args.next();
-                        if let Some(program) = program {
-                            let mut cmd = RunCommand::new(program);
-                            if cmd.args(["pax-init", "--force"]).status().is_err() {
-                                println!("Failed to re-execute!");
-                                return;
-                            }
-                            let mut cmd = RunCommand::new(program);
-                            if cmd.args(args).status().is_err() {
-                                println!("Failed to re-execute!");
-                            }
-                        } else {
-                            println!("Failed to locate program!");
-                        }
-                    }
-                    Some(false) => (),
-                }
-            }
             PostAction::Return => (),
         }
     }

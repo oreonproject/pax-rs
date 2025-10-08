@@ -6,7 +6,7 @@ use crate::symlinks::SymlinkManager;
 use crate::verify::verify_package;
 use crate::{Command, PostAction, StateBox};
 use nix::unistd;
-use settings::get_settings;
+use settings::{get_settings, get_settings_or_local};
 use std::collections::HashMap;
 use std::io::Write;
 
@@ -29,10 +29,10 @@ fn run(_: &StateBox, _args: Option<&[String]>) -> PostAction {
         return PostAction::Elevate;
     }
 
-    // load settings
-    let settings = match get_settings() {
+    // load settings - use local-only settings if endpoints.txt doesn't exist
+    let settings = match get_settings_or_local() {
         Ok(s) => s,
-        Err(_) => return PostAction::PullSources,
+        Err(_) => return PostAction::Return,
     };
 
     // initialize components
@@ -59,6 +59,12 @@ fn run(_: &StateBox, _args: Option<&[String]>) -> PostAction {
             return PostAction::Return;
         }
     };
+
+    // initialize repository client (if sources are configured)
+    if settings.sources.is_empty() {
+        println!("No repository sources configured. Cannot check for updates.");
+        return PostAction::Return;
+    }
 
     let repo_client = match create_client_from_settings(&settings) {
         Ok(c) => c,
