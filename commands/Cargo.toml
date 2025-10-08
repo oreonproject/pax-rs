@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 flags.workspace = true
 statebox.workspace = true
+utils.workspace = true

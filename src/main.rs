@@ -5,6 +5,7 @@ pub use {
     flags::Flag,
     settings::SettingsYaml,
     statebox::StateBox,
+    utils::err,
 };
 
 pub mod endpoints_init;

@@ -1,7 +1,7 @@
 use flags::Flag;
 use metadata::get_local_deps;
 use tokio::runtime::Runtime;
-use utils::is_root;
+use utils::{choice, is_root};
 
 use crate::{Command, PostAction, StateBox};
 
@@ -20,7 +20,7 @@ pub fn build(hierarchy: &[String]) -> Command {
         "remove",
         vec![String::from("r")],
         "Removes a package, whilst maintaining any user-made configurations",
-        vec![specific],
+        vec![specific, utils::yes_flag()],
         None,
         run,
         hierarchy,
@@ -57,6 +57,37 @@ fn run(states: &StateBox, args: Option<&[String]>) -> PostAction {
             println!();
             if metadatas.is_empty() {
                 return PostAction::NothingToDo;
+            }
+            println!(
+                "\nThe following packages will be REMOVED:  \x1B[91m{}\x1B[0m",
+                metadatas
+                    .remove
+                    .iter()
+                    .fold(String::new(), |acc, x| format!("{acc} {}", x.name))
+                    .trim()
+            );
+            if metadatas.has_deps() {
+                println!(
+                    "The following packages will be MODIFIED: \x1B[93m{}\x1B[0m",
+                    metadatas
+                        .modify
+                        .iter()
+                        .fold(String::new(), |acc, x| format!("{acc} {}", x.name))
+                        .trim()
+                );
+                if states.get("yes").is_none_or(|x: &bool| !*x) {
+                    match choice("Continue?", true) {
+                        Err(message) => {
+                            println!("{message}");
+                            return PostAction::Return;
+                        }
+                        Ok(false) => {
+                            println!("Aborted.");
+                            return PostAction::Return;
+                        }
+                        Ok(true) => (),
+                    };
+                }
             }
             //
         }

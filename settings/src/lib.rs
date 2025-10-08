@@ -5,7 +5,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use utils::get_dir;
+use utils::{err, get_dir};
 
 #[derive(PartialEq, Serialize, Deserialize, Debug)]
 pub struct SettingsYaml {
@@ -31,15 +31,15 @@ impl Default for SettingsYaml {
 pub fn get_settings() -> Result<SettingsYaml, String> {
     let mut file = match File::open(affirm_path()?) {
         Ok(file) => file,
-        Err(_) => return Err(String::from("Failed to open SettingsYaml as RO!")),
+        Err(_) => return err!("Failed to open SettingsYaml as RO!"),
     };
     let mut sources = String::new();
     if file.read_to_string(&mut sources).is_err() {
-        return Err(String::from("Failed to read file!"));
+        return err!("Failed to read file!");
     };
     let sources = match serde_norway::from_str(&sources) {
         Ok(settings_yaml) => settings_yaml,
-        Err(_) => return Err(String::from("Failed to parse data into SettingsYaml!")),
+        Err(_) => return err!("Failed to parse data into SettingsYaml!"),
     };
     Ok(sources)
 }
@@ -47,15 +47,15 @@ pub fn get_settings() -> Result<SettingsYaml, String> {
 pub fn set_settings(settings: SettingsYaml) -> Result<(), String> {
     let mut file = match File::create(affirm_path()?) {
         Ok(file) => file,
-        Err(_) => return Err(String::from("Failed to open SettingsYaml as WO!")),
+        Err(_) => return err!("Failed to open SettingsYaml as WO!"),
     };
     let settings = match serde_norway::to_string(&settings) {
         Ok(settings) => settings,
-        Err(_) => return Err(String::from("Failed to parse SettingsYaml to string!")),
+        Err(_) => return err!("Failed to parse SettingsYaml to string!"),
     };
     match file.write_all(settings.as_bytes()) {
         Ok(_) => Ok(()),
-        Err(_) => Err(String::from("Failed to write to file!")),
+        Err(_) => err!("Failed to write to file!"),
     }
 }
 
@@ -69,21 +69,21 @@ fn affirm_path() -> Result<PathBuf, String> {
                     if file.write_all(new_settings.as_bytes()).is_ok() {
                         Ok(path)
                     } else {
-                        Err(String::from("Failed to write to file!"))
+                        err!("Failed to write to file!")
                     }
                 } else {
-                    Err(String::from("Failed to serialize settings!"))
+                    err!("Failed to serialize settings!")
                 }
             }
-            Err(_) => Err(String::from("Failed to create settings file!")),
+            Err(_) => err!("Failed to create settings file!"),
         }
     } else if path.is_file() {
         if File::open(&path).is_ok() {
             Ok(path)
         } else {
-            Err(String::from("Failed to read settings file!"))
+            err!("Failed to read settings file!")
         }
     } else {
-        Err(String::from("Settings file is of unexpected type!"))
+        err!("Settings file is of unexpected type!")
     }
 }
