@@ -8,9 +8,11 @@ pub use {
     utils::err,
 };
 
+pub mod emancipate;
 pub mod endpoints_init;
 pub mod install;
 pub mod remove;
+pub mod update;
 
 pub fn main() {
     let args: Vec<String> = env::args().collect();
@@ -32,6 +34,8 @@ pub fn main() {
             install::build,
             remove::build_remove,
             remove::build_purge,
+            update::build,
+            emancipate::build,
         ]),
         |_command, _args| PostAction::GetHelp,
         &[],

@@ -1,4 +1,3 @@
-use flags::Flag;
 use metadata::get_local_deps;
 use tokio::runtime::Runtime;
 use utils::{choice, is_root};
@@ -6,21 +5,11 @@ use utils::{choice, is_root};
 use crate::{Command, PostAction, StateBox};
 
 pub fn build_remove(hierarchy: &[String]) -> Command {
-    let specific = Flag::new(
-        Some('s'),
-        "specific",
-        "Makes every second argument the target version for the argument prior.",
-        false,
-        false,
-        |states, _| {
-            states.shove("specific", true);
-        },
-    );
     Command::new(
         "remove",
         vec![String::from("r")],
         "Removes a package, whilst maintaining any user-made configurations",
-        vec![specific, utils::yes_flag()],
+        vec![utils::specific_flag(), utils::yes_flag()],
         None,
         remove,
         hierarchy,
@@ -28,21 +17,11 @@ pub fn build_remove(hierarchy: &[String]) -> Command {
 }
 
 pub fn build_purge(hierarchy: &[String]) -> Command {
-    let specific = Flag::new(
-        Some('s'),
-        "specific",
-        "Makes every second argument the target version for the argument prior.",
-        false,
-        false,
-        |states, _| {
-            states.shove("specific", true);
-        },
-    );
     Command::new(
         "purge",
-        vec![String::from("r")],
+        vec![String::from("p")],
         "Removes a package, WITHOUT maintaining any user-made configurations",
-        vec![specific, utils::yes_flag()],
+        vec![utils::specific_flag(), utils::yes_flag()],
         None,
         purge,
         hierarchy,
@@ -124,7 +103,7 @@ fn run(states: &StateBox, args: Option<&[String]>, purge: bool) -> PostAction {
                 match package.remove_version(purge) {
                     Ok(()) => (),
                     Err(message) => {
-                        println!("Operation failed!\nReported Error: \"{message}\"");
+                        println!("Operation failed!\nReported Error: \"\x1B[91m{message}\x1B[0m\"");
                         println!("\x1B[91m=== YOU MAY HAVE BROKEN PACKAGES! ===\x1B[0m");
                         return PostAction::Return;
                     }
@@ -132,7 +111,7 @@ fn run(states: &StateBox, args: Option<&[String]>, purge: bool) -> PostAction {
             }
         }
         Err(fault) => {
-            println!("\x1B[2K\r{fault}");
+            println!("\x1B[2K\r\x1B[91m{fault}\x1B[0m");
         }
     };
     PostAction::Return

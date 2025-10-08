@@ -1,5 +1,6 @@
 use semver::Version;
 use serde::{Deserialize, Serialize};
+use settings::get_settings;
 use std::hash::Hash;
 use std::{
     collections::HashSet,
@@ -9,7 +10,7 @@ use std::{
     process::Command as RunCommand,
 };
 use tokio::runtime::Runtime;
-use utils::{err, get_metadata_dir, tmpfile};
+use utils::{err, get_metadata_dir, get_update_dir, tmpfile};
 
 pub fn build_deps(
     args: &[String],
@@ -101,7 +102,7 @@ async fn get_deps(
     Ok(deps)
 }
 
-#[derive(PartialEq, Eq, Debug, Hash)]
+#[derive(PartialEq, Eq, Serialize, Deserialize, Debug, Hash)]
 pub struct ProcessedMetaData {
     pub name: String,
     pub kind: MetaDataKind,
@@ -115,7 +116,7 @@ pub struct ProcessedMetaData {
     pub hash: String,
 }
 
-#[derive(PartialEq, Eq, Debug, Hash)]
+#[derive(PartialEq, Eq, Serialize, Deserialize, Debug, Hash)]
 pub enum ProcessedInstallKind {
     PreBuilt(PreBuilt),
     Compilable(ProcessedCompilable),
@@ -125,7 +126,7 @@ pub struct PreBuilt {
     pub critical: Vec<String>,
     pub configs: Vec<String>,
 }
-#[derive(PartialEq, Eq, Debug, Hash)]
+#[derive(PartialEq, Eq, Serialize, Deserialize, Debug, Hash)]
 pub struct ProcessedCompilable {
     pub build: String,
     pub install: String,
@@ -237,6 +238,29 @@ impl ProcessedMetaData {
             }
         }
         Ok(deps)
+    }
+    pub fn write(self, base: &Path, inc: &mut usize) -> Result<Self, String> {
+        let path = loop {
+            let mut path = base.to_path_buf();
+            path.push(format!("{inc}.yaml"));
+            if path.exists() {
+                *inc += 1;
+                continue;
+            }
+            break path;
+        };
+        let mut file = match File::create(&path) {
+            Ok(file) => file,
+            Err(_) => return err!("Failed to open upgrade metadata as WO!"),
+        };
+        let data = match serde_norway::to_string(&self) {
+            Ok(data) => data,
+            Err(_) => return err!("Failed to parse upgrade metadata to string!"),
+        };
+        match file.write_all(data.as_bytes()) {
+            Ok(_) => Ok(self),
+            Err(_) => err!("Failed to write upgrade metadata file!"),
+        }
     }
 }
 
@@ -745,6 +769,7 @@ fn get_metadata_path(name: &str) -> Result<(PathBuf, Option<InstalledMetaData>),
     }
 }
 
+/* #region Remove/Purge */
 pub async fn get_local_deps(args: &[(&String, Option<&String>)]) -> Result<QueuedChanges, String> {
     print!("\x1B[2K\rCollecting dependencies... 0%");
     let mut children = Vec::new();
@@ -792,15 +817,6 @@ async fn get_local_dep(
             result.extend(items);
             result.insert_mod(dependency.clone());
         }
-        // for dependent in &version.dependents {
-        //     let items = Box::pin(get_local_dep(
-        //         &(&dependent.name, Some(&dependent.version)),
-        //         false,
-        //     ))
-        //     .await?;
-        //     result.extend(items);
-        //     result.insert_rem(dependent.clone());
-        // }
         if root {
             result.insert_rem(Specific {
                 name: data.name.to_string(),
@@ -855,3 +871,111 @@ impl Default for QueuedChanges {
         Self::new()
     }
 }
+/* #endregion Remove/Purge */
+/* #region Upgrade */
+pub async fn collect_upgrades() -> Result<(), String> {
+    let settings = get_settings()?;
+    print!("\x1B[2K\rReading package lists... 0%");
+    let path = get_metadata_dir()?;
+    let dir = match fs::read_dir(&path) {
+        Ok(dir) => dir,
+        Err(_) => {
+            return err!("Failed to read {} as a directory!", path.display());
+        }
+    };
+    let mut children = Vec::new();
+    for file in dir.flatten() {
+        children.push(collect_upgrade(file.path(), &settings.sources));
+    }
+    let dir = get_update_dir()?;
+    let mut result = Vec::new();
+    let count = children.len();
+    for (i, child) in children.into_iter().enumerate() {
+        print!("\rReading package lists... {}%", i * 100 / count);
+        result.extend(child.await?);
+    }
+    print!("\rReading package lists... Done!\nSaving upgrade data... 0%");
+    let mut inc = 0;
+    let count = result.len();
+    for (i, data) in result.into_iter().enumerate() {
+        print!("\rSaving upgrade data... {}%", i * 100 / count);
+        data.write(&dir, &mut inc)?;
+    }
+    println!("\rSaving upgrade data... Done!");
+    Ok(())
+}
+
+async fn collect_upgrade(
+    path: PathBuf,
+    sources: &[String],
+) -> Result<Vec<ProcessedMetaData>, String> {
+    let mut result = Vec::new();
+    if path.extension().is_none_or(|x| x != "yaml") {
+        return Ok(Vec::new());
+    }
+    let name = if let Some(name) = path.file_prefix() {
+        name.to_string_lossy()
+    } else {
+        return Ok(Vec::new());
+    };
+    let metadata = InstalledMetaData::open(&name)?;
+    let name = metadata.name;
+    for version in metadata.installed {
+        let name = name.to_string();
+        if version.dependents.is_empty()
+            && !version.dependent
+            && let Some(data) = get_metadata(&name, None, sources, true).await
+            && Version::parse(&data.version).unwrap_or(Version::new(0, 0, 0))
+                > Version::parse(&version.version).unwrap_or(Version::new(0, 0, 0))
+        {
+            result.push(data);
+        }
+    }
+    Ok(result)
+}
+/* #endregion Upgrade */
+/* #region Emancipate */
+pub fn emancipate(data: &[(&String, Option<&String>)]) -> Result<(), String> {
+    for bit in data {
+        let (dep, ver) = *bit;
+        let (path, data) = get_metadata_path(dep)?;
+        let mut data = if let Some(data) = data {
+            data
+        } else {
+            return err!("Cannot find data for package `{dep}`!");
+        };
+        if let Some(ver) = ver {
+            println!("Emancipating `{dep}` version {ver}...",);
+            if let Some(specific) = data.installed.iter_mut().find(|x| x.version == *ver) {
+                if !specific.dependent {
+                    println!(
+                        "\x1B[33m[WARN] `{dep}` version {ver} is already independent!\x1B[0m..."
+                    );
+                    continue;
+                }
+                specific.dependent = false;
+            }
+        } else {
+            println!("Emancipating `{dep}`...",);
+            let mut collection = data
+                .installed
+                .iter_mut()
+                .filter(|x| x.dependent)
+                .collect::<Vec<&mut InstalledVersion>>();
+            match collection.len() {
+                0 => println!(
+                    "\x1B[33m[WARN] All versions of `{dep}` are already independent!\x1B[0m...",
+                ),
+                1 => collection.iter_mut().for_each(|x| x.dependent = false),
+                _ => {
+                    return err!(
+                        "Ambiguous reference to `{dep}`. Use with `-s` to specify a version."
+                    );
+                }
+            }
+        };
+        data.write(&path)?;
+    }
+    Ok(())
+}
+/* #endregion Emancipate */

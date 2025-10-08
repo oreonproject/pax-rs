@@ -22,6 +22,16 @@ pub fn get_metadata_dir() -> Result<PathBuf, String> {
     }
 }
 
+pub fn get_update_dir() -> Result<PathBuf, String> {
+    let mut path = get_dir()?;
+    path.push("updates");
+    if !path.exists() && DirBuilder::new().create(&path).is_err() {
+        err!("Failed to create pax installation directory!")
+    } else {
+        Ok(path)
+    }
+}
+
 pub fn is_root() -> bool {
     unistd::geteuid().as_raw() == 0
 }
@@ -41,6 +51,19 @@ pub fn yes_flag() -> Flag {
         false,
         |states, _| {
             states.shove("yes", true);
+        },
+    )
+}
+
+pub fn specific_flag() -> Flag {
+    Flag::new(
+        Some('s'),
+        "specific",
+        "Makes every second argument the target version for the argument prior.",
+        false,
+        false,
+        |states, _| {
+            states.shove("specific", true);
         },
     )
 }

@@ -53,7 +53,7 @@ To continue anyway, run with flag `\x1B[35m--{LONG_NAME}\x1B[0m`."
             }
             Err(e) => {
                 println!("Failed to save sources! Are you sudo?");
-                println!("Reported error: \"{e}\"");
+                println!("Reported error: \"\x1B[91m{e}\x1B[0m\"");
                 return PostAction::Return;
             }
         }

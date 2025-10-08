@@ -58,7 +58,7 @@ fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
                             },
                             Err(message) => {
                                 println!(
-                                    "Error installing package {name}!\nReported error: \"{message}\"",
+                                    "Error installing package {name}!\nReported error: \"\x1B[91m{message}\x1B[0m\"",
                                 );
                                 return PostAction::Return;
                             }
@@ -67,7 +67,7 @@ fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
                 }
             }
         }
-        Err(fault) => println!("\x1B[2K\r{fault}"),
+        Err(fault) => println!("\x1B[2K\r\x1B[91m{fault}\x1B[0m"),
     }
     PostAction::Return
 }

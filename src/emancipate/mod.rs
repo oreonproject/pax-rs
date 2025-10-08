@@ -1,0 +1,44 @@
+use metadata::emancipate;
+use utils::is_root;
+
+use crate::{Command, PostAction, StateBox};
+
+pub fn build(hierarchy: &[String]) -> Command {
+    Command::new(
+        // WHat the fuck? Yes, I will hopefully find a better name...
+        "emancipate",
+        vec![String::from("e")],
+        "Marks a dependent package as independent.",
+        vec![utils::specific_flag()],
+        None,
+        run,
+        hierarchy,
+    )
+}
+
+fn run(states: &StateBox, args: Option<&[String]>) -> PostAction {
+    if !is_root() {
+        return PostAction::Elevate;
+    }
+    let mut args = match args {
+        None => return PostAction::NothingToDo,
+        Some(args) => args.iter(),
+    };
+    let mut data = Vec::new();
+    if states.get("specific").is_some_and(|x| *x) {
+        while let Some(name) = args.next()
+            && let Some(ver) = args.next()
+        {
+            data.push((name, Some(ver)));
+        }
+    } else {
+        args.for_each(|x| data.push((x, None)));
+    }
+    match emancipate(&data) {
+        Ok(()) => (),
+        Err(fault) => {
+            println!("\x1B[2K\r\x1B[91m{fault}\x1B[0m");
+        }
+    }
+    PostAction::Return
+}
