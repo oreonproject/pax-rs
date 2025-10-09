@@ -122,24 +122,20 @@ fn verify_pax_structure<P: AsRef<Path>>(package_path: P) -> Result<bool, String>
         .map_err(|e| format!("Invalid zstd compression: {}", e))?;
     
     let mut archive = Archive::new(decoder);
-    let mut has_metadata = false;
-
-    for entry in archive.entries()
-        .map_err(|e| format!("Invalid tar archive: {}", e))? {
-        let entry = entry
-            .map_err(|e| format!("Failed to read entry: {}", e))?;
-        
-        let path = entry.path()
-            .map_err(|e| format!("Failed to get entry path: {}", e))?;
-        
-        if path == std::path::Path::new("metadata.json") {
-            has_metadata = true;
-            break;
-        }
+    
+    // Just check if we can read the archive and it has at least one entry
+    let entries = archive.entries()
+        .map_err(|e| format!("Invalid tar archive: {}", e))?;
+    
+    let mut has_entries = false;
+    for entry in entries {
+        let _ = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
+        has_entries = true;
+        break;
     }
 
-    if !has_metadata {
-        return Err("Package missing metadata.json".to_string());
+    if !has_entries {
+        return Err("Package is empty".to_string());
     }
 
     Ok(true)

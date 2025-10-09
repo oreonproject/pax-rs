@@ -8,7 +8,21 @@ pub fn get_system_arch() -> String {
     std::env::consts::ARCH.to_string()
 }
 
-// Repository metadata structure
+// Repository metadata structure (new nested format)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepositoryMetadata {
+    pub distros: Vec<DistroMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DistroMetadata {
+    pub name: String,
+    pub packages: Vec<PackageEntry>,
+    pub version: String,
+    pub last_updated: i64,
+}
+
+// Legacy flat structure for backwards compatibility
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepositoryIndex {
     pub packages: Vec<PackageEntry>,
@@ -20,6 +34,8 @@ pub struct RepositoryIndex {
 pub struct PackageEntry {
     pub name: String,
     pub version: String,
+    #[serde(default)]
+    pub architecture: Option<String>,
     pub description: String,
     #[serde(default)]
     pub dependencies: Vec<String>,
@@ -37,11 +53,12 @@ pub struct PackageEntry {
 pub struct RepositoryClient {
     client: Client,
     sources: Vec<String>,
+    distro_version: String,
 }
 
 impl RepositoryClient {
     // Create new repository client
-    pub fn new(sources: Vec<String>) -> Result<Self, String> {
+    pub fn new(sources: Vec<String>, distro_version: String) -> Result<Self, String> {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
@@ -50,7 +67,11 @@ impl RepositoryClient {
         // Expand mirrorlists to actual endpoints
         let expanded_sources = Self::expand_mirrorlists(&client, sources);
 
-        Ok(RepositoryClient { client, sources: expanded_sources })
+        Ok(RepositoryClient { 
+            client, 
+            sources: expanded_sources,
+            distro_version,
+        })
     }
     
     // Expand mirrorlist URLs to actual mirror endpoints
@@ -90,22 +111,33 @@ impl RepositoryClient {
     pub fn fetch_index(&self, source_url: &str) -> Result<RepositoryIndex, String> {
         let url = format!("{}/repository/metadata", source_url);
         
-        println!("Fetching repository index from {}...", source_url);
+        println!("Fetching repository metadata from {}...", source_url);
         
         let response = self.client.get(&url)
             .send()
-            .map_err(|e| format!("Failed to fetch index: {}", e))?;
+            .map_err(|e| format!("Failed to fetch metadata: {}", e))?;
 
         if !response.status().is_success() {
-            return Err(format!("Failed to fetch index: {}", response.status()));
+            return Err(format!("Failed to fetch metadata: {}", response.status()));
         }
 
         let text = response.text()
             .map_err(|e| format!("Failed to read response: {}", e))?;
-        let index: RepositoryIndex = serde_json::from_str(&text)
-            .map_err(|e| format!("Failed to parse index: {}", e))?;
+        
+        let metadata: RepositoryMetadata = serde_json::from_str(&text)
+            .map_err(|e| format!("Failed to parse metadata: {}", e))?;
 
-        Ok(index)
+        // Find the matching distro
+        let distro = metadata.distros.iter()
+            .find(|d| d.name == self.distro_version)
+            .ok_or_else(|| format!("Distro version '{}' not found in repository", self.distro_version))?;
+
+        // Convert to flat RepositoryIndex for compatibility
+        Ok(RepositoryIndex {
+            packages: distro.packages.clone(),
+            version: distro.version.clone(),
+            last_updated: distro.last_updated,
+        })
     }
 
     // Fetch all repository indexes
@@ -130,17 +162,18 @@ impl RepositoryClient {
     // Search for a package across all repositories (tries all repos for fallback)
     pub fn search_package(&self, name: &str) -> Result<Option<(String, PackageEntry)>, String> {
         let indexes = self.fetch_all_indexes();
-        let system_arch = get_system_arch();
 
         // Try each repository in order, fallback to next if not found
         for (source, index) in indexes {
             for mut package in index.packages {
                 if package.name == name {
-                    // Update download_url to include architecture in format: name-version-arch.pax
-                    package.download_url = format!("{}/packages/{}-{}-{}.pax", 
-                        source, package.name, package.version, system_arch);
-                    package.signature_url = format!("{}/packages/{}-{}-{}.pax.sig", 
-                        source, package.name, package.version, system_arch);
+                    // Convert relative URLs to absolute URLs by prefixing with source
+                    if !package.download_url.starts_with("http://") && !package.download_url.starts_with("https://") {
+                        package.download_url = format!("{}{}", source, package.download_url);
+                    }
+                    if !package.signature_url.starts_with("http://") && !package.signature_url.starts_with("https://") {
+                        package.signature_url = format!("{}{}", source, package.signature_url);
+                    }
                     return Ok(Some((source, package)));
                 }
             }
@@ -152,16 +185,17 @@ impl RepositoryClient {
     // Search for a package with specific version, tries all repos
     pub fn search_package_version(&self, name: &str, version: &str) -> Result<Option<(String, PackageEntry)>, String> {
         let indexes = self.fetch_all_indexes();
-        let system_arch = get_system_arch();
 
         for (source, index) in indexes {
             for mut package in index.packages {
                 if package.name == name && package.version == version {
-                    // Update download_url to include architecture in format: name-version-arch.pax
-                    package.download_url = format!("{}/packages/{}-{}-{}.pax", 
-                        source, package.name, package.version, system_arch);
-                    package.signature_url = format!("{}/packages/{}-{}-{}.pax.sig", 
-                        source, package.name, package.version, system_arch);
+                    // Convert relative URLs to absolute URLs by prefixing with source
+                    if !package.download_url.starts_with("http://") && !package.download_url.starts_with("https://") {
+                        package.download_url = format!("{}{}", source, package.download_url);
+                    }
+                    if !package.signature_url.starts_with("http://") && !package.signature_url.starts_with("https://") {
+                        package.signature_url = format!("{}{}", source, package.signature_url);
+                    }
                     return Ok(Some((source, package)));
                 }
             }
@@ -309,6 +343,6 @@ pub fn create_client_from_settings(
         return Err("No repository sources configured. Run 'pax pax-init --force' to initialize.".to_string());
     }
 
-    RepositoryClient::new(settings.sources.clone())
+    RepositoryClient::new(settings.sources.clone(), settings.distro_version.clone())
 }
 

@@ -8,7 +8,8 @@ use zstd::stream::read::Decoder as ZstdDecoder;
 use tar::Archive as TarArchive;
 
 // Native .pax package format
-// Structure: zstd compressed tarball with metadata.json at root
+// Structure: zstd compressed tarball containing files to install
+// Metadata comes from repository API, not from inside the package
 pub struct PaxAdapter {
     path: PathBuf,
     metadata: Option<PaxMetadata>,

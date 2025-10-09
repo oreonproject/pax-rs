@@ -12,7 +12,7 @@ use crate::repository::{create_client_from_settings, PackageEntry};
 use crate::resolver::{DependencyResolver, PackageInfo};
 use crate::store::PackageStore;
 use crate::symlinks::SymlinkManager;
-use crate::verify::verify_package;
+use crate::verify::{verify_package, verify_with_options, VerifyOptions};
 use crate::{Command, PostAction, StateBox};
 use nix::unistd;
 use settings::{get_settings_or_local};
@@ -34,23 +34,39 @@ struct LocalPackageMetadata {
 }
 
 pub fn build(hierarchy: &[String]) -> Command {
+    use flags::Flag;
+    
     Command::new(
         "install",
         vec![String::from("i")],
         "Install packages with dependency resolution",
-        Vec::new(),
+        vec![
+            Flag::new(
+                None,
+                "skip-signature",
+                "Skip signature verification (use with caution)",
+                false,
+                false,
+                |states, _| {
+                    states.shove("skip_signature", true);
+                },
+            ),
+        ],
         None,
         run,
         hierarchy,
     )
 }
 
-fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
+fn run(states: &StateBox, args: Option<&[String]>) -> PostAction {
     // Check for root privileges
     let euid = unistd::geteuid();
     if euid.as_raw() != 0 {
         return PostAction::Elevate;
     }
+
+    // Check if signature verification should be skipped
+    let skip_signature = states.get::<bool>("skip_signature").copied().unwrap_or(false);
 
     let args = match args {
         None => {
@@ -167,6 +183,7 @@ fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
             let pkg_entry = PackageEntry {
                 name: metadata.name.clone(),
                 version: metadata.version.clone(),
+                architecture: None,
                 description: metadata.description.clone(),
                 hash,
                 download_url: format!("file://{}", canonical_path.display()),
@@ -337,6 +354,7 @@ fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
             &db,
             &provides_mgr,
             &symlink_mgr,
+            skip_signature,
         ) {
             overall_progress.finish_and_clear();
             println!("Failed to install {}: {}", pkg.name, e);
@@ -370,6 +388,7 @@ fn install_package(
     db: &Database,
     provides_mgr: &ProvidesManager,
     symlink_mgr: &SymlinkManager,
+    skip_signature: bool,
 ) -> Result<(), String> {
     // Skip if already installed
     if db.is_installed(pkg_name)
@@ -418,7 +437,19 @@ fn install_package(
 
         // Verify package
         println!("Verifying package...");
-        let verify_result = verify_package(&pkg_path, &sig_path, &entry.hash)?;
+        
+        let verify_result = if skip_signature {
+            println!("\x1B[33mWARNING: Skipping signature verification\x1B[0m");
+            let options = VerifyOptions {
+                verify_hash: true,
+                verify_signature: false,
+                verify_structure: true,
+                force_insecure: false,
+            };
+            verify_with_options(&pkg_path, Some(&sig_path), Some(&entry.hash), "pax", &options)?
+        } else {
+            verify_package(&pkg_path, &sig_path, &entry.hash)?
+        };
 
         if !verify_result.is_valid() {
             return Err(format!("Verification failed: {}", verify_result.error_message()));

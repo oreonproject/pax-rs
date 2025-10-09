@@ -3,7 +3,7 @@ use crate::download::DownloadManager;
 use crate::repository::create_client_from_settings;
 use crate::store::PackageStore;
 use crate::symlinks::SymlinkManager;
-use crate::verify::verify_package;
+use crate::verify::{verify_package, verify_with_options, VerifyOptions};
 use crate::{Command, PostAction, StateBox};
 use nix::unistd;
 use settings::{get_settings_or_local};
@@ -11,23 +11,39 @@ use std::collections::HashMap;
 use std::io::Write;
 
 pub fn build(hierarchy: &[String]) -> Command {
+    use flags::Flag;
+    
     Command::new(
         "update",
         vec![String::from("upgrade")],
         "Update installed packages to latest versions",
-        Vec::new(),
+        vec![
+            Flag::new(
+                None,
+                "skip-signature",
+                "Skip signature verification (use with caution)",
+                false,
+                false,
+                |states, _| {
+                    states.shove("skip_signature", true);
+                },
+            ),
+        ],
         None,
         run,
         hierarchy,
     )
 }
 
-fn run(_: &StateBox, _args: Option<&[String]>) -> PostAction {
+fn run(states: &StateBox, _args: Option<&[String]>) -> PostAction {
     // check for root
     let euid = unistd::geteuid();
     if euid.as_raw() != 0 {
         return PostAction::Elevate;
     }
+
+    // Check if signature verification should be skipped
+    let skip_signature = states.get::<bool>("skip_signature").copied().unwrap_or(false);
 
     // load settings - use local-only settings if endpoints.txt doesn't exist
     let settings = match get_settings_or_local() {
@@ -129,6 +145,7 @@ fn run(_: &StateBox, _args: Option<&[String]>) -> PostAction {
             &store,
             &db,
             &symlink_mgr,
+            skip_signature,
         ) {
             println!("Failed to update {}: {}", pkg_name, e);
             println!("Update aborted");
@@ -154,6 +171,7 @@ fn update_package(
     store: &PackageStore,
     db: &Database,
     symlink_mgr: &SymlinkManager,
+    skip_signature: bool,
 ) -> Result<(), String> {
     println!("\nUpdating {}...", pkg_name);
 
@@ -189,7 +207,19 @@ fn update_package(
 
     // verify
     println!("Verifying package...");
-    let verify_result = verify_package(&pkg_path, &sig_path, &entry.hash)?;
+    
+    let verify_result = if skip_signature {
+        println!("\x1B[33mWARNING: Skipping signature verification\x1B[0m");
+        let options = VerifyOptions {
+            verify_hash: true,
+            verify_signature: false,
+            verify_structure: true,
+            force_insecure: false,
+        };
+        verify_with_options(&pkg_path, Some(&sig_path), Some(&entry.hash), "pax", &options)?
+    } else {
+        verify_package(&pkg_path, &sig_path, &entry.hash)?
+    };
     
     if !verify_result.is_valid() {
         return Err(format!("Verification failed: {}", verify_result.error_message()));

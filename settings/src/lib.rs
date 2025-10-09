@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 #[derive(PartialEq, Serialize, Deserialize, Debug, Clone)]
 pub struct SettingsYaml {
     pub sources: Vec<String>,
+    #[serde(default = "default_distro_version")]
+    pub distro_version: String,
     #[serde(default = "default_db_path")]
     pub db_path: String,
     #[serde(default = "default_store_path")]
@@ -21,6 +23,10 @@ pub struct SettingsYaml {
     pub parallel_downloads: usize,
     #[serde(default = "default_verify_signatures")]
     pub verify_signatures: bool,
+}
+
+fn default_distro_version() -> String {
+    "oreon-11".to_string()
 }
 
 fn default_db_path() -> String {
@@ -64,6 +70,7 @@ pub fn get_settings() -> Result<SettingsYaml, String> {
 
     let settings = SettingsYaml {
         sources: vec!["http://localhost:8080".to_string()],
+        distro_version: default_distro_version(),
         db_path: default_db_path(),
         store_path: default_store_path(),
         cache_path: default_cache_path(),
@@ -96,6 +103,7 @@ pub fn get_settings_or_local() -> Result<SettingsYaml, String> {
     // If no settings exist, return local-only settings
     Ok(SettingsYaml {
         sources: Vec::new(),
+        distro_version: default_distro_version(),
         db_path: default_db_path(),
         store_path: default_store_path(),
         cache_path: default_cache_path(),
