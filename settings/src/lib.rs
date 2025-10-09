@@ -54,7 +54,14 @@ pub fn get_settings() -> Result<SettingsYaml, String> {
     }
 
     // If no settings exist, create a new one and initialize it
-    let mut file = affirm_path()?;
+    // NOTE: Only create if file doesn't exist (never overwrite existing)
+    let file_path = get_settings_path()?;
+    
+    if file_path.exists() {
+        // File exists but couldn't be parsed - return error
+        return Err(String::from("Settings file exists but is invalid. Please check /etc/pax/settings.yaml"));
+    }
+
     let settings = SettingsYaml {
         sources: vec!["http://localhost:8080".to_string()],
         db_path: default_db_path(),
@@ -69,6 +76,9 @@ pub fn get_settings() -> Result<SettingsYaml, String> {
         Ok(content) => content,
         Err(_) => return Err(String::from("Failed to serialize default settings!")),
     };
+
+    let mut file = File::create(&file_path)
+        .map_err(|_| String::from("Failed to create settings file!"))?;
 
     if file.write_all(settings_content.as_bytes()).is_err() {
         return Err(String::from("Failed to write default settings!"));
@@ -126,37 +136,47 @@ fn auto_initialize_settings() -> Result<SettingsYaml, String> {
 }
 
 pub fn set_settings(settings: SettingsYaml) -> Result<(), String> {
-    let mut file = affirm_path()?;
-    let settings = match serde_norway::to_string(&settings) {
+    // Get the settings file path - DO NOT create if doesn't exist
+    let file_path = get_settings_path()?;
+    
+    let settings_content = match serde_norway::to_string(&settings) {
         Ok(settings) => settings,
         Err(_) => return Err(String::from("Failed to parse SettingsYaml to string!")),
     };
-    match file.write_all(settings.as_bytes()) {
+    
+    // Write to existing file or create new one
+    match std::fs::write(&file_path, settings_content.as_bytes()) {
         Ok(_) => Ok(()),
-        Err(_) => Err(String::from("Failed to write to file!")),
+        Err(_) => Err(String::from("Failed to write to settings file!")),
     }
 }
 
-fn affirm_path() -> Result<File, String> {
+// Get the settings file path without creating it
+fn get_settings_path() -> Result<PathBuf, String> {
     // Try system path first
-    let mut path = PathBuf::from("/etc/pax");
-    if path.exists() || DirBuilder::new().create(&path).is_ok() {
-        path.push("settings.yaml");
-        if path.is_file() || !path.exists() {
-            if let Ok(file) = File::create(&path) {
-                return Ok(file);
-            }
-        }
+    let system_dir = PathBuf::from("/etc/pax");
+    let system_path = system_dir.join("settings.yaml");
+    
+    // Check if system path exists or can be created
+    if system_path.exists() {
+        return Ok(system_path);
+    }
+    
+    if system_dir.exists() || DirBuilder::new().create(&system_dir).is_ok() {
+        return Ok(system_path);
     }
 
     // Fall back to user path for development
-    let mut user_path = PathBuf::from("/tmp/pax");
-    if user_path.exists() || DirBuilder::new().create(&user_path).is_ok() {
-        user_path.push("settings.yaml");
-        if let Ok(file) = File::create(&user_path) {
-            return Ok(file);
-        }
+    let user_dir = PathBuf::from("/tmp/pax");
+    let user_path = user_dir.join("settings.yaml");
+    
+    if user_path.exists() {
+        return Ok(user_path);
+    }
+    
+    if user_dir.exists() || DirBuilder::new().create(&user_dir).is_ok() {
+        return Ok(user_path);
     }
 
-    Err(String::from("Failed to create settings file in any location!"))
+    Err(String::from("Failed to access settings directory!"))
 }

@@ -88,16 +88,33 @@ impl DependencyResolver {
 
         // Resolve dependencies first (depth-first)
         for dep in &pkg_info.dependencies {
-            // Try to resolve dependency
-            let dep_name = self.resolve_dependency_name(&dep.name, available_packages)?;
+            // Skip if dependency is already satisfied by system
+            if self.provides_mgr.is_satisfied(&dep.name).unwrap_or(false) {
+                visited.insert(dep.name.clone());
+                continue;
+            }
             
-            self.resolve_recursive(
-                &dep_name,
-                available_packages,
-                resolved,
-                visited,
-                order_counter,
-            )?;
+            // Try to resolve dependency
+            match self.resolve_dependency_name(&dep.name, available_packages) {
+                Ok(dep_name) => {
+                    self.resolve_recursive(
+                        &dep_name,
+                        available_packages,
+                        resolved,
+                        visited,
+                        order_counter,
+                    )?;
+                }
+                Err(e) if e.contains("satisfied by system") => {
+                    // System-satisfied dependency, skip it
+                    visited.insert(dep.name.clone());
+                    continue;
+                }
+                Err(e) => {
+                    // Real error, propagate it
+                    return Err(e);
+                }
+            }
         }
 
         // Add this package after its dependencies

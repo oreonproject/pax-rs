@@ -149,7 +149,19 @@ impl SymlinkManager {
                 fs::remove_file(target)
                     .map_err(|e| format!("Failed to remove existing symlink: {}", e))?;
             } else {
-                return Err(format!("Target exists and is not a symlink: {}", target.display()));
+                // Warn but don't fail - the file already exists (likely system-managed)
+                eprintln!("Warning: {} already exists (not managed by pax), skipping system symlink", target.display());
+                return Ok(());
+            }
+        }
+        
+        // Also check if the binary exists elsewhere in PATH
+        if let Some(filename) = target.file_name() {
+            if let Some(filename_str) = filename.to_str() {
+                if Self::check_command_exists(filename_str) {
+                    eprintln!("Warning: '{}' already exists in system PATH. The pax version will be in {}", 
+                             filename_str, target.display());
+                }
             }
         }
 
@@ -164,6 +176,15 @@ impl SymlinkManager {
 
         Ok(())
     }
+    
+    // Check if a command exists in system PATH
+    fn check_command_exists(cmd: &str) -> bool {
+        std::process::Command::new("which")
+            .arg(cmd)
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    }
 
     // Remove symlinks for a package
     pub fn remove_symlinks(&self, package_id: i64) -> Result<(), String> {
@@ -173,18 +194,43 @@ impl SymlinkManager {
         for link in symlinks {
             let link_path = PathBuf::from(&link.link_path);
             
+            // Extract relative path from full path for system link determination
+            let relative_link = if let Ok(rel) = link_path.strip_prefix(&self.links_base) {
+                rel.to_string_lossy().to_string()
+            } else {
+                // Fallback: just use the file name if it's in bin/lib
+                if let Some(filename) = link_path.file_name() {
+                    if link_path.to_string_lossy().contains("/bin/") {
+                        format!("bin/{}", filename.to_string_lossy())
+                    } else if link_path.to_string_lossy().contains("/lib/") {
+                        format!("lib/{}", filename.to_string_lossy())
+                    } else {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+            };
+
+            // Remove the pax links directory symlink
             if link_path.exists() && link_path.is_symlink() {
                 fs::remove_file(&link_path)
-                    .map_err(|e| format!("Failed to remove symlink: {}", e))?;
+                    .map_err(|e| format!("Failed to remove symlink {}: {}", link_path.display(), e))?;
             }
 
-            // Also remove system symlink if it points to our link
-            if let Some(system_link) = self.determine_system_link(&link.link_path) {
-                if system_link.exists() && system_link.is_symlink() {
-                    if let Ok(target) = fs::read_link(&system_link) {
-                        if target == link_path {
-                            let _ = fs::remove_file(&system_link);
+            // Also remove system symlink if it exists
+            if let Some(system_link) = self.determine_system_link(&relative_link) {
+                if system_link.exists() {
+                    if system_link.is_symlink() {
+                        // Verify it points to our link before removing
+                        if let Ok(target) = fs::read_link(&system_link) {
+                            if target == link_path || target == link_path.canonicalize().unwrap_or(link_path.clone()) {
+                                fs::remove_file(&system_link)
+                                    .map_err(|e| format!("Failed to remove system symlink {}: {}", system_link.display(), e))?;
+                            }
                         }
+                    } else {
+                        eprintln!("Warning: {} exists but is not a symlink, skipping", system_link.display());
                     }
                 }
             }

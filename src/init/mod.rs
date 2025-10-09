@@ -39,6 +39,14 @@ fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
         USER_SETTINGS_PATH
     };
 
+    // Check if settings file already exists
+    if std::path::Path::new(settings_path).exists() {
+        println!("Settings file already exists at {}", settings_path);
+        println!("Pax is already initialized. To reconfigure, please edit the file manually.");
+        println!("Note: The settings file is never automatically overwritten to preserve your configuration.");
+        return PostAction::Return;
+    }
+
     // Create settings.yaml with default configuration
     let settings_content = format!(
         "sources:\n  - {}\ndb_path: /opt/pax/db/pax.db\nstore_path: /opt/pax/store\ncache_path: /var/cache/pax\nlinks_path: /opt/pax/links\nparallel_downloads: 3\nverify_signatures: true\n",
@@ -54,5 +62,6 @@ fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
     }
 
     println!("Pax initialized successfully.");
+    println!("Settings file created at: {}", settings_path);
     PostAction::Return
 }

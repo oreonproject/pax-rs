@@ -1,15 +1,20 @@
 use crate::database::{Database, ProvidesInfo};
+use crate::distro_compat::DistroCompat;
 use std::process::Command;
 
 // Provides manager for tracking what packages provide
 pub struct ProvidesManager {
     db: Database,
+    distro_compat: DistroCompat,
 }
 
 impl ProvidesManager {
     // Create new provides manager
     pub fn new(db: Database) -> Self {
-        ProvidesManager { db }
+        ProvidesManager { 
+            db,
+            distro_compat: DistroCompat::new(),
+        }
     }
 
     // Add a provide entry
@@ -38,6 +43,12 @@ impl ProvidesManager {
             return Ok(true);
         }
 
+        // Check for special runtime linker symbols
+        if dep_name.starts_with("rtld(") || dep_name.starts_with("ld-linux") {
+            // Runtime linker symbols are always provided by the system
+            return Ok(true);
+        }
+
         // Check if it's a system binary
         if self.check_system_binary(dep_name) {
             return Ok(true);
@@ -45,6 +56,11 @@ impl ProvidesManager {
 
         // Check if it's a system library
         if self.check_system_library(dep_name) {
+            return Ok(true);
+        }
+
+        // Check if it's a system package (with distro translation)
+        if self.distro_compat.is_dependency_satisfied(dep_name) {
             return Ok(true);
         }
 
@@ -62,15 +78,24 @@ impl ProvidesManager {
 
     // Check if a library exists on the system
     fn check_system_library(&self, name: &str) -> bool {
+        // Parse the library name to extract the base library
+        // Handle RPM-style dependencies like: libc.so.6(GLIBC_2.34)(64bit)
+        let lib_name = Self::parse_library_name(name);
+        
         // Try ldconfig to check for library
-        if name.contains(".so") {
+        if lib_name.contains(".so") {
             let output = Command::new("ldconfig")
                 .arg("-p")
                 .output();
             
             if let Ok(output) = output {
                 let stdout = String::from_utf8_lossy(&output.stdout);
-                return stdout.contains(name);
+                // Check if the base library name is found
+                if stdout.lines().any(|line| {
+                    line.contains(&lib_name) || line.contains(name)
+                }) {
+                    return true;
+                }
             }
         }
 
@@ -85,13 +110,45 @@ impl ProvidesManager {
         ];
 
         for dir in &lib_dirs {
-            let path = std::path::Path::new(dir).join(name);
-            if path.exists() {
+            // Try exact match first
+            let exact_path = std::path::Path::new(dir).join(name);
+            if exact_path.exists() {
                 return true;
+            }
+            
+            // Try base library name
+            let base_path = std::path::Path::new(dir).join(&lib_name);
+            if base_path.exists() {
+                return true;
+            }
+            
+            // Check for any version of the library
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    if let Ok(file_name) = entry.file_name().into_string() {
+                        if file_name.starts_with(&lib_name) {
+                            return true;
+                        }
+                    }
+                }
             }
         }
 
         false
+    }
+    
+    // Parse library name from RPM/DEB dependency format
+    // Examples:
+    //   libc.so.6(GLIBC_2.34)(64bit) -> libc.so.6
+    //   libssl.so.1.1 -> libssl.so.1.1
+    //   rtld(GNU_HASH) -> rtld
+    fn parse_library_name(dep_name: &str) -> String {
+        // Remove anything in parentheses (version symbols, architecture)
+        if let Some(paren_pos) = dep_name.find('(') {
+            dep_name[..paren_pos].to_string()
+        } else {
+            dep_name.to_string()
+        }
     }
 
     // Find which package provides something

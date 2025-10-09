@@ -1,7 +1,8 @@
 use super::*;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
-// RPM package adapter
+// RPM package adapter using rpm command as backend
 pub struct RpmAdapter {
     path: PathBuf,
 }
@@ -15,82 +16,179 @@ impl RpmAdapter {
             return Err(format!("File does not exist: {}", path.display()));
         }
 
+        // Verify rpm command is available
+        Self::check_rpm_available()?;
+
         Ok(RpmAdapter { path })
+    }
+
+    // Check if rpm command is available
+    fn check_rpm_available() -> Result<(), String> {
+        let output = Command::new("which")
+            .arg("rpm")
+            .output();
+        
+        match output {
+            Ok(output) if output.status.success() => Ok(()),
+            _ => Err("rpm command not found. Please install rpm tools.".to_string())
+        }
+    }
+
+    // Query RPM metadata field
+    fn query_rpm(&self, format: &str) -> Result<String, String> {
+        let output = Command::new("rpm")
+            .args(&["-qp", "--queryformat", format, self.path.to_str().unwrap()])
+            .output()
+            .map_err(|e| format!("Failed to run rpm: {}", e))?;
+        
+        if !output.status.success() {
+            return Err(format!("rpm query failed: {}", String::from_utf8_lossy(&output.stderr)));
+        }
+        
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    // Query RPM list field (like requires, provides)
+    fn query_rpm_list(&self, flag: &str) -> Result<Vec<String>, String> {
+        let output = Command::new("rpm")
+            .args(&["-qp", flag, self.path.to_str().unwrap()])
+            .output()
+            .map_err(|e| format!("Failed to run rpm: {}", e))?;
+        
+        if !output.status.success() {
+            return Err(format!("rpm query failed: {}", String::from_utf8_lossy(&output.stderr)));
+        }
+        
+        let result = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .filter(|line| !line.starts_with("rpmlib("))
+            .map(|line| {
+                // Extract just the package name, removing version constraints
+                line.split_whitespace()
+                    .next()
+                    .unwrap_or(line)
+                    .to_string()
+            })
+            .collect();
+        
+        Ok(result)
     }
 }
 
 impl PackageAdapter for RpmAdapter {
     fn extract_metadata(&self) -> Result<PackageMetadata, String> {
-        // Simplified RPM metadata extraction
-        // In a full implementation, we'd parse the RPM header
-        // For now, extract basic info from filename
+        // Query RPM metadata using rpm command
+        let name = self.query_rpm("%{NAME}")?;
+        let version = self.query_rpm("%{VERSION}-%{RELEASE}")?;
+        let description = self.query_rpm("%{SUMMARY}")?;
         
-        let filename = self.path.file_stem()
-            .and_then(|s| s.to_str())
-            .ok_or("Invalid filename")?;
+        // Get dependencies (requires)
+        let dep_names = self.query_rpm_list("--requires")?;
+        let dependencies: Vec<Dependency> = dep_names.into_iter()
+            .map(|name| Dependency {
+                name,
+                version_constraint: None,
+                dep_type: DependencyType::Runtime,
+            })
+            .collect();
         
-        // Try to parse filename: package-version-release.arch
-        let parts: Vec<&str> = filename.split('-').collect();
-        let name = parts.get(0).unwrap_or(&"unknown").to_string();
-        let version = parts.get(1).unwrap_or(&"unknown").to_string();
+        // Get provides
+        let provide_names = self.query_rpm_list("--provides")?;
+        let mut provides: Vec<Provides> = provide_names.into_iter()
+            .map(|name| Provides {
+                name,
+                version: None,
+                provide_type: ProvideType::Virtual,
+            })
+            .collect();
+        
+        // Add package name itself as a provide
+        if !provides.iter().any(|p| p.name == name) {
+            provides.insert(0, Provides {
+                name: name.clone(),
+                version: Some(version.clone()),
+                provide_type: ProvideType::Virtual,
+            });
+        }
+        
+        // Get conflicts
+        let conflicts = self.query_rpm_list("--conflicts")
+            .unwrap_or_default();
         
         Ok(PackageMetadata {
             name,
             version,
-            description: "RPM package (limited metadata - install rpm-python for full support)".to_string(),
+            description,
             origin: "rpm".to_string(),
-            dependencies: Vec::new(),
-            runtime_dependencies: Vec::new(),
-            provides: Vec::new(),
-            conflicts: Vec::new(),
+            dependencies: dependencies.clone(),
+            runtime_dependencies: dependencies,
+            provides,
+            conflicts,
         })
     }
 
     fn extract_files(&self, dest_dir: &Path) -> Result<Vec<FileEntry>, String> {
-        // RPM files contain a cpio archive - we need to extract it
-        // The rpm crate doesn't provide direct extraction, so we shell out to rpm2cpio
-        
         std::fs::create_dir_all(dest_dir)
             .map_err(|e| format!("Failed to create dest dir: {}", e))?;
 
-        // Try using rpm2cpio + cpio command
-        // First check if rpm2cpio is available
-        let rpm2cpio_check = std::process::Command::new("which")
-            .arg("rpm2cpio")
-            .output();
+        // Extract using rpm2cpio + cpio
+        let rpm2cpio = Command::new("rpm2cpio")
+            .arg(self.path.to_str().unwrap())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to run rpm2cpio: {}", e))?;
 
-        if rpm2cpio_check.is_ok() && rpm2cpio_check.unwrap().status.success() {
-            // Use rpm2cpio for extraction
-            self.extract_with_rpm2cpio(dest_dir)?;
-        } else {
-            // Fallback: try to extract manually from RPM payload
-            self.extract_payload_manual(dest_dir)?;
+        let cpio = Command::new("cpio")
+            .args(&["-idm", "--quiet"])
+            .current_dir(dest_dir)
+            .stdin(rpm2cpio.stdout.ok_or("Failed to get rpm2cpio stdout")?)
+            .output()
+            .map_err(|e| format!("Failed to run cpio: {}", e))?;
+
+        if !cpio.status.success() {
+            return Err(format!("cpio extraction failed: {}", String::from_utf8_lossy(&cpio.stderr)));
         }
 
-        // List extracted files
+        // List files using rpm -qpl
+        let output = Command::new("rpm")
+            .args(&["-qpl", self.path.to_str().unwrap()])
+            .output()
+            .map_err(|e| format!("Failed to list RPM contents: {}", e))?;
+        
+        if !output.status.success() {
+            return Err(format!("rpm listing failed: {}", String::from_utf8_lossy(&output.stderr)));
+        }
+
         let mut entries = Vec::new();
-        for entry in walkdir::WalkDir::new(dest_dir) {
-            let entry = entry.map_err(|e| format!("Failed to walk directory: {}", e))?;
-            if entry.path() == dest_dir {
+        let listing = String::from_utf8_lossy(&output.stdout);
+        
+        for line in listing.lines() {
+            let path = line.trim();
+            
+            if path.is_empty() {
                 continue;
             }
-
-            let relative_path = entry.path()
-                .strip_prefix(dest_dir)
-                .unwrap()
-                .to_string_lossy()
-                .to_string();
-
-            let file_type = if entry.file_type().is_dir() {
+            
+            // Remove leading slash to make relative
+            let relative_path = path.strip_prefix('/').unwrap_or(path);
+            
+            if relative_path.is_empty() {
+                continue;
+            }
+            
+            // Determine file type from filesystem after extraction
+            let full_path = dest_dir.join(relative_path);
+            let file_type = if full_path.is_dir() {
                 FileType::Directory
-            } else if entry.file_type().is_symlink() {
+            } else if full_path.is_symlink() {
                 FileType::Symlink
             } else {
                 FileType::Regular
             };
 
             entries.push(FileEntry {
-                path: relative_path,
+                path: relative_path.to_string(),
                 file_type,
             });
         }
@@ -106,11 +204,65 @@ impl PackageAdapter for RpmAdapter {
         Ok(self.extract_metadata()?.provides)
     }
 
-    fn run_script(&self, _stage: ScriptStage) -> Result<(), String> {
-        // RPM scriptlets - we need to be careful running these to prevent our system from being fucked
-        // For now, we'll just log that they exist
-        // Note: With simplified RPM parsing, we can't extract scriptlets
-        // This would require full RPM header parsing
+    fn run_script(&self, stage: ScriptStage) -> Result<(), String> {
+        use tempfile::NamedTempFile;
+        use std::io::Write;
+        
+        let script_flag = match stage {
+            ScriptStage::PreInstall => "--script=prein",
+            ScriptStage::PostInstall => "--script=postin",
+            ScriptStage::PreRemove => "--script=preun",
+            ScriptStage::PostRemove => "--script=postun",
+        };
+
+        // Query scriptlet content
+        let output = Command::new("rpm")
+            .args(&["-qp", script_flag, self.path.to_str().unwrap()])
+            .output()
+            .map_err(|e| format!("Failed to query RPM scriptlet: {}", e))?;
+        
+        if !output.status.success() || output.stdout.is_empty() {
+            return Ok(());
+        }
+
+        let script_content = String::from_utf8_lossy(&output.stdout);
+        
+        if script_content.trim().is_empty() {
+            return Ok(());
+        }
+
+        println!("Running RPM {:?} scriptlet...", stage);
+
+        // Write script to temporary file and execute
+        let mut temp_file = NamedTempFile::new()
+            .map_err(|e| format!("Failed to create temp script file: {}", e))?;
+        
+        temp_file.write_all(script_content.as_bytes())
+            .map_err(|e| format!("Failed to write script: {}", e))?;
+        
+        // Make script executable
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(temp_file.path())
+                .map_err(|e| format!("Failed to get script permissions: {}", e))?
+                .permissions();
+            perms.set_mode(0o700);
+            std::fs::set_permissions(temp_file.path(), perms)
+                .map_err(|e| format!("Failed to set script permissions: {}", e))?;
+        }
+        
+        // Execute script with sh
+        let output = Command::new("sh")
+            .arg(temp_file.path())
+            .output()
+            .map_err(|e| format!("Failed to execute scriptlet: {}", e))?;
+        
+        if !output.status.success() {
+            eprintln!("Warning: {:?} scriptlet failed: {}", stage, String::from_utf8_lossy(&output.stderr));
+        } else {
+            println!("Scriptlet executed successfully");
+        }
         
         Ok(())
     }
@@ -118,51 +270,6 @@ impl PackageAdapter for RpmAdapter {
     fn get_hash(&self) -> Result<String, String> {
         crate::crypto::calculate_sha256(&self.path)
             .map_err(|e| format!("Failed to calculate hash: {}", e))
-    }
-}
-
-// Helper methods for RPM extraction (not part of trait)
-impl RpmAdapter {
-    // Extract using rpm2cpio command
-    fn extract_with_rpm2cpio(&self, dest_dir: &Path) -> Result<(), String> {
-        use std::process::{Command, Stdio};
-
-        let rpm2cpio = Command::new("rpm2cpio")
-            .arg(&self.path)
-            .stdout(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("Failed to spawn rpm2cpio: {}", e))?;
-
-        let cpio = Command::new("cpio")
-            .arg("-idm")
-            .current_dir(dest_dir)
-            .stdin(rpm2cpio.stdout.ok_or("Failed to get rpm2cpio stdout")?)
-            .output()
-            .map_err(|e| format!("Failed to run cpio: {}", e))?;
-
-        if !cpio.status.success() {
-            return Err(format!("cpio extraction failed: {}", 
-                String::from_utf8_lossy(&cpio.stderr)));
-        }
-
-        Ok(())
-    }
-
-    // Fallback manual extraction (limited, mainly for testing)
-    fn extract_payload_manual(&self, dest_dir: &Path) -> Result<(), String> {
-        // This is a simplified fallback
-        // In practice, proper RPM extraction requires handling the CPIO format
-        // which is complex, so we prefer rpm2cpio when available
-        
-        println!("Warning: rpm2cpio not found, using limited extraction");
-        println!("Install rpm2cpio for full RPM support");
-        println!("Note: Manual RPM extraction is not fully implemented");
-        
-        // Just create the destination directory
-        std::fs::create_dir_all(dest_dir)
-            .map_err(|e| format!("Failed to create directory: {}", e))?;
-
-        Ok(())
     }
 }
 

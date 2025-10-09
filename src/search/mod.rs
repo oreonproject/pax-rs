@@ -1,8 +1,7 @@
 use crate::database::Database;
-use crate::repository::{create_client_from_settings, RepositoryClient};
+use crate::repository::create_client_from_settings;
 use crate::{Command, PostAction, StateBox};
-use settings::{get_settings, get_settings_or_local};
-use std::collections::HashMap;
+use settings::get_settings_or_local;
 
 pub fn build(hierarchy: &[String]) -> Command {
     Command::new(

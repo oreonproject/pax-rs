@@ -108,7 +108,7 @@ fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
     let provides_mgr = ProvidesManager::new(db.clone());
     let symlink_mgr = SymlinkManager::new(db.clone(), "/opt/pax/links");
 
-    println!("Resolving dependencies...");
+    let resolve_progress = crate::progress::create_simple_progress("Resolving dependencies");
 
     // Search for packages in repositories
     let mut packages_to_install = HashMap::new();
@@ -224,25 +224,69 @@ fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
     // Check for unmet dependencies BEFORE resolving
     println!("Checking dependencies...");
     let mut unmet_deps = Vec::new();
+    let mut system_deps_ok = 0;
     
     for (pkg_name, (_, entry)) in &packages_to_install {
         for dep in &entry.dependencies {
             // Check if dependency is satisfied by system or will be installed
-            if !provides_mgr.is_satisfied(dep).unwrap_or(false) 
-                && !packages_to_install.contains_key(dep)
-                && !db.is_installed(dep).unwrap_or(false) {
-                unmet_deps.push((pkg_name.clone(), dep.clone()));
+            if packages_to_install.contains_key(dep) || db.is_installed(dep).unwrap_or(false) {
+                // Will be installed or already installed
+                continue;
+            }
+            
+            // Check if satisfied by system
+            match provides_mgr.is_satisfied(dep) {
+                Ok(true) => {
+                    // Satisfied by system, count it
+                    system_deps_ok += 1;
+                }
+                Ok(false) => {
+                    // Not satisfied
+                    unmet_deps.push((pkg_name.clone(), dep.clone()));
+                }
+                Err(_) => {
+                    // Error checking, assume not satisfied
+                    unmet_deps.push((pkg_name.clone(), dep.clone()));
+                }
             }
         }
     }
     
+    if system_deps_ok > 0 {
+        println!("  {} system dependencies satisfied", system_deps_ok);
+    }
+    
     if !unmet_deps.is_empty() {
-        println!("\n\x1B[31mError: Unmet dependencies detected!\x1B[0m");
+        // Separate system library dependencies from package dependencies
+        let mut sys_lib_deps = Vec::new();
+        let mut pkg_deps = Vec::new();
+        
         for (pkg, dep) in &unmet_deps {
-            println!("  {} requires: {}", pkg, dep);
+            if dep.contains(".so") || dep.contains("(") || dep.starts_with("rtld") {
+                sys_lib_deps.push((pkg, dep));
+            } else {
+                pkg_deps.push((pkg, dep));
+            }
         }
-        println!("\nInstallation aborted. Please install missing dependencies first.");
-        return PostAction::Return;
+        
+        if !pkg_deps.is_empty() {
+            println!("\n\x1B[31mError: Missing package dependencies!\x1B[0m");
+            for (pkg, dep) in &pkg_deps {
+                println!("  {} requires: {}", pkg, dep);
+            }
+            println!("\nInstallation aborted. Please install missing packages first.");
+            return PostAction::Return;
+        }
+        
+        if !sys_lib_deps.is_empty() {
+            println!("\n\x1B[33mWarning: Some system library dependencies could not be verified:\x1B[0m");
+            for (pkg, dep) in &sys_lib_deps {
+                println!("  {} requires: {}", pkg, dep);
+            }
+            println!("\nThese may be satisfied by your system's package manager.");
+            println!("If installation fails, install the required libraries using official repositories or another package manager.");
+            println!("Continuing with installation...");
+        }
     }
 
     // Resolve dependencies
@@ -250,10 +294,13 @@ fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
     let resolved = match resolver.resolve(&package_names, &available) {
         Ok(r) => r,
         Err(e) => {
+            resolve_progress.finish_and_clear();
             println!("\x1B[31mDependency resolution failed: {}\x1B[0m", e);
             return PostAction::Return;
         }
     };
+    
+    resolve_progress.finish_and_clear();
 
     println!("\nPackages to install:");
     for pkg in &resolved {
@@ -274,8 +321,13 @@ fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
         return PostAction::Return;
     }
 
-    // Install packages in order
+    // Install packages in order with overall progress
+    let total_packages = resolved.len() as u64;
+    let overall_progress = crate::progress::create_progress_bar(total_packages, "Overall progress");
+    
     for pkg in resolved {
+        println!("Installing {}...", pkg.name);
+        
         if let Err(e) = install_package(
             &pkg.name,
             &packages_to_install,
@@ -286,11 +338,17 @@ fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
             &provides_mgr,
             &symlink_mgr,
         ) {
+            overall_progress.finish_and_clear();
             println!("Failed to install {}: {}", pkg.name, e);
             println!("Installation aborted");
             return PostAction::Return;
         }
+        
+        overall_progress.inc(1);
     }
+    
+    overall_progress.finish_and_clear();
+    println!("\nAll packages installed successfully!");
 
     // Update library cache
     println!("\nUpdating system library cache...");
@@ -369,20 +427,23 @@ fn install_package(
         pkg_path
     };
 
-    // Extract to store
-    println!("Extracting package...");
+    // Extract to store with progress indicator
+    let extract_progress = crate::progress::create_simple_progress("Extracting package");
     let hash = entry.hash.clone();
     
     // Detect package type and extract
     let (files, pkg_type) = if let Some(pkg_type) = detect_package_type(&pkg_path) {
         let files = match pkg_type {
             PackageType::Pax => {
+                extract_progress.set_message("Extracting PAX package...");
                 store.extract_pax_package(&pkg_path, &hash)?
             }
             PackageType::Rpm => {
+                extract_progress.set_message("Extracting RPM package...");
                 extract_rpm_to_store(&pkg_path, &hash, store)?
             }
             PackageType::Deb => {
+                extract_progress.set_message("Extracting DEB package...");
                 extract_deb_to_store(&pkg_path, &hash, store)?
             }
         };
@@ -390,11 +451,13 @@ fn install_package(
     } else {
         return Err("Unknown package type".to_string());
     };
+    
+    extract_progress.finish_and_clear();
 
     let size = store.get_package_size(&hash)?;
 
-    // Add to database
-    println!("Updating database...");
+    // Add to database with progress
+    let db_progress = crate::progress::create_simple_progress("Updating database");
     let pkg_id = db.insert_package(
         pkg_name,
         &entry.version,
@@ -404,11 +467,15 @@ fn install_package(
         size,
     ).map_err(|e| format!("Failed to insert package: {}", e))?;
 
-    // Add file entries
+    // Add file entries with progress
+    let files_total = files.len() as u64;
+    let files_progress = crate::progress::create_progress_bar(files_total, "Adding files");
     for file in &files {
         db.add_file(pkg_id, file, "regular")
             .map_err(|e| format!("Failed to add file: {}", e))?;
+        files_progress.inc(1);
     }
+    files_progress.finish_and_clear();
 
     // Add dependencies
     for dep in &entry.dependencies {
@@ -421,18 +488,21 @@ fn install_package(
         db.add_provides(pkg_id, provide, None, "virtual")
             .map_err(|e| format!("Failed to add provide: {}", e))?;
     }
+    
+    db_progress.finish_and_clear();
 
     // Run pre-install scriptlets
     let _ = run_scriptlets(&pkg_path, pkg_type, "pre", pkg_id, &store.get_package_path(&hash));
     
-    // Create symlinks
-    println!("Creating symlinks...");
+    // Create symlinks with progress
+    let symlink_progress = crate::progress::create_simple_progress("Creating symlinks");
     symlink_mgr.create_symlinks(
         pkg_id,
         &hash,
         &store.get_package_path(&hash),
         &files,
     )?;
+    symlink_progress.finish_and_clear();
 
     // Run post-install scriptlets
     let _ = run_scriptlets(&pkg_path, pkg_type, "post", pkg_id, &store.get_package_path(&hash));
@@ -445,7 +515,7 @@ fn install_package(
 /// Extract metadata from a local .pax package
 fn extract_pax_metadata(package_path: &str) -> Result<LocalPackageMetadata, String> {
     use tempfile::TempDir;
-    use std::process::Command;
+    
     
     let temp_dir = TempDir::new()
         .map_err(|e| format!("Failed to create temp directory: {}", e))?;
@@ -510,7 +580,7 @@ fn extract_native_metadata(package_path: &str, pkg_type: PackageType) -> Result<
 
 /// Extract metadata from RPM package
 fn extract_rpm_metadata(package_path: &str) -> Result<LocalPackageMetadata, String> {
-    use std::process::Command;
+    
     
     // Use rpm command to query package info
     let name_output = std::process::Command::new("rpm")
@@ -602,7 +672,7 @@ fn extract_rpm_metadata(package_path: &str) -> Result<LocalPackageMetadata, Stri
 
 /// Extract metadata from DEB package
 fn extract_deb_metadata(package_path: &str) -> Result<LocalPackageMetadata, String> {
-    use std::process::Command;
+    
     
     // Use dpkg-deb to query package info
     let info_output = std::process::Command::new("dpkg-deb")
@@ -700,7 +770,7 @@ fn extract_deb_metadata(package_path: &str) -> Result<LocalPackageMetadata, Stri
 
 /// Extract RPM package to store
 fn extract_rpm_to_store(rpm_path: &std::path::Path, hash: &str, store: &PackageStore) -> Result<Vec<String>, String> {
-    use std::process::Command;
+    
     
     let dest = store.get_package_path(hash);
     fs::create_dir_all(&dest)
@@ -730,7 +800,7 @@ fn extract_rpm_to_store(rpm_path: &std::path::Path, hash: &str, store: &PackageS
 
 /// Extract DEB package to store
 fn extract_deb_to_store(deb_path: &std::path::Path, hash: &str, store: &PackageStore) -> Result<Vec<String>, String> {
-    use std::process::Command;
+    
     
     let dest = store.get_package_path(hash);
     fs::create_dir_all(&dest)
@@ -752,7 +822,7 @@ fn extract_deb_to_store(deb_path: &std::path::Path, hash: &str, store: &PackageS
 
 /// Run package scriptlets
 fn run_scriptlets(pkg_path: &std::path::Path, pkg_type: PackageType, stage: &str, pkg_id: i64, store_path: &std::path::Path) -> Result<(), String> {
-    use std::process::Command;
+    
     
     match pkg_type {
         PackageType::Rpm => {

@@ -1,12 +1,8 @@
 use super::*;
-use std::fs::File;
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use ar::Archive as ArArchive;
-use tar::Archive as TarArchive;
-use flate2::read::GzDecoder;
+use std::process::Command;
 
-// Debian package adapter
+// Debian package adapter using dpkg/dpkg-deb backend
 pub struct DebAdapter {
     path: PathBuf,
 }
@@ -20,46 +16,36 @@ impl DebAdapter {
             return Err(format!("File does not exist: {}", path.display()));
         }
 
+        // Verify dpkg-deb is available
+        Self::check_dpkg_available()?;
+
         Ok(DebAdapter { path })
     }
 
-    // Read control file from .deb package
-    fn read_control_file(&self) -> Result<String, String> {
-        let file = File::open(&self.path)
-            .map_err(|e| format!("Failed to open deb file: {}", e))?;
+    // Check if dpkg-deb command is available
+    fn check_dpkg_available() -> Result<(), String> {
+        let output = Command::new("which")
+            .arg("dpkg-deb")
+            .output();
         
-        let mut archive = ArArchive::new(file);
-        
-        // .deb files contain: debian-binary, control.tar.gz, data.tar.gz
-        while let Some(entry) = archive.next_entry() {
-            let entry = entry.map_err(|e| format!("Failed to read ar entry: {}", e))?;
-            let name = std::str::from_utf8(entry.header().identifier())
-                .map_err(|e| format!("Invalid entry name: {}", e))?;
-
-            if name.starts_with("control.tar") {
-                // Extract control.tar.gz content
-                let decoder = GzDecoder::new(entry);
-                let mut tar = TarArchive::new(decoder);
-                
-                for entry in tar.entries()
-                    .map_err(|e| format!("Failed to read tar entries: {}", e))? {
-                    let mut entry = entry
-                        .map_err(|e| format!("Failed to read tar entry: {}", e))?;
-                    
-                    let path = entry.path()
-                        .map_err(|e| format!("Failed to get entry path: {}", e))?;
-                    
-                    if path.file_name() == Some(std::ffi::OsStr::new("control")) {
-                        let mut contents = String::new();
-                        entry.read_to_string(&mut contents)
-                            .map_err(|e| format!("Failed to read control file: {}", e))?;
-                        return Ok(contents);
-                    }
-                }
-            }
+        match output {
+            Ok(output) if output.status.success() => Ok(()),
+            _ => Err("dpkg-deb command not found. Please install dpkg tools.".to_string())
         }
+    }
 
-        Err("Control file not found in package".to_string())
+    // Read control file from .deb package using dpkg-deb
+    fn read_control_file(&self) -> Result<String, String> {
+        let output = Command::new("dpkg-deb")
+            .args(&["-f", self.path.to_str().unwrap()])
+            .output()
+            .map_err(|e| format!("Failed to run dpkg-deb: {}", e))?;
+        
+        if !output.status.success() {
+            return Err(format!("dpkg-deb failed: {}", String::from_utf8_lossy(&output.stderr)));
+        }
+        
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
 
     // Parse debian control file format
@@ -79,6 +65,11 @@ impl DebAdapter {
         // Debian deps format: "pkg1 (>= 1.0), pkg2, pkg3 (<< 2.0)"
         for dep in dep_string.split(',') {
             let dep = dep.trim();
+            
+            // Skip alternative dependencies (containing |)
+            if dep.contains('|') {
+                continue;
+            }
             
             // Parse version constraint
             if let Some(paren_start) = dep.find('(') {
@@ -178,82 +169,62 @@ impl PackageAdapter for DebAdapter {
     }
 
     fn extract_files(&self, dest_dir: &Path) -> Result<Vec<FileEntry>, String> {
-        let file = File::open(&self.path)
-            .map_err(|e| format!("Failed to open deb file: {}", e))?;
+        std::fs::create_dir_all(dest_dir)
+            .map_err(|e| format!("Failed to create dest dir: {}", e))?;
+
+        // Extract using dpkg-deb -x
+        let output = Command::new("dpkg-deb")
+            .args(&["-x", self.path.to_str().unwrap(), dest_dir.to_str().unwrap()])
+            .output()
+            .map_err(|e| format!("Failed to run dpkg-deb: {}", e))?;
         
-        let mut archive = ArArchive::new(file);
-        let mut entries = Vec::new();
-        
-        // Find and extract data.tar.gz or data.tar.xz
-        while let Some(entry) = archive.next_entry() {
-            let entry = entry.map_err(|e| format!("Failed to read ar entry: {}", e))?;
-            let name = std::str::from_utf8(entry.header().identifier())
-                .map_err(|e| format!("Invalid entry name: {}", e))?;
-
-            if name.starts_with("data.tar") {
-                std::fs::create_dir_all(dest_dir)
-                    .map_err(|e| format!("Failed to create dest dir: {}", e))?;
-
-                // Handle different compression formats
-                if name.ends_with(".gz") {
-                    let decoder = GzDecoder::new(entry);
-                    let mut tar = TarArchive::new(decoder);
-                    tar.unpack(dest_dir)
-                        .map_err(|e| format!("Failed to extract data: {}", e))?;
-                } else {
-                    // uncompressed or other format
-                    let mut tar = TarArchive::new(entry);
-                    tar.unpack(dest_dir)
-                        .map_err(|e| format!("Failed to extract data: {}", e))?;
-                }
-
-                // List extracted files
-                let file = File::open(&self.path)
-                    .map_err(|e| format!("Failed to reopen file: {}", e))?;
-                let mut archive = ArArchive::new(file);
-                
-                while let Some(entry) = archive.next_entry() {
-                    let entry = entry.map_err(|e| format!("Failed to read ar entry: {}", e))?;
-                    let name = std::str::from_utf8(entry.header().identifier())
-                        .map_err(|e| format!("Invalid entry name: {}", e))?;
-
-                    if name.starts_with("data.tar") {
-                        let mut tar: TarArchive<Box<dyn Read>> = if name.ends_with(".gz") {
-                            TarArchive::new(Box::new(GzDecoder::new(entry)))
-                        } else {
-                            TarArchive::new(Box::new(entry))
-                        };
-
-                        for entry in tar.entries()
-                            .map_err(|e| format!("Failed to list entries: {}", e))? {
-                            let entry = entry
-                                .map_err(|e| format!("Failed to read entry: {}", e))?;
-                            
-                            let path = entry.path()
-                                .map_err(|e| format!("Failed to get path: {}", e))?
-                                .to_string_lossy()
-                                .to_string();
-                            
-                            let file_type = if entry.header().entry_type().is_dir() {
-                                FileType::Directory
-                            } else if entry.header().entry_type().is_symlink() {
-                                FileType::Symlink
-                            } else {
-                                FileType::Regular
-                            };
-
-                            entries.push(FileEntry { path, file_type });
-                        }
-
-                        break;
-                    }
-                }
-
-                return Ok(entries);
-            }
+        if !output.status.success() {
+            return Err(format!("dpkg-deb extraction failed: {}", String::from_utf8_lossy(&output.stderr)));
         }
 
-        Err("data.tar not found in package".to_string())
+        // List files using dpkg-deb -c
+        let output = Command::new("dpkg-deb")
+            .args(&["-c", self.path.to_str().unwrap()])
+            .output()
+            .map_err(|e| format!("Failed to list package contents: {}", e))?;
+        
+        if !output.status.success() {
+            return Err(format!("dpkg-deb listing failed: {}", String::from_utf8_lossy(&output.stderr)));
+        }
+
+        let mut entries = Vec::new();
+        let listing = String::from_utf8_lossy(&output.stdout);
+        
+        for line in listing.lines() {
+            // Parse dpkg-deb -c output format: "permissions user/group size date time ./path"
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() < 6 {
+                continue;
+            }
+            
+            let path_str = parts[parts.len() - 1];
+            let path = path_str.trim_start_matches("./");
+            
+            if path.is_empty() || path == "." {
+                continue;
+            }
+            
+            // Determine file type from first character of permissions
+            let file_type = if parts[0].starts_with('d') {
+                FileType::Directory
+            } else if parts[0].starts_with('l') {
+                FileType::Symlink
+            } else {
+                FileType::Regular
+            };
+
+            entries.push(FileEntry {
+                path: path.to_string(),
+                file_type,
+            });
+        }
+
+        Ok(entries)
     }
 
     fn get_dependencies(&self) -> Result<Vec<Dependency>, String> {
@@ -265,8 +236,7 @@ impl PackageAdapter for DebAdapter {
     }
 
     fn run_script(&self, stage: ScriptStage) -> Result<(), String> {
-        // Debian maintainer scripts - also need careful handling
-        // Scripts are in control.tar.gz: preinst, postinst, prerm, postrm
+        use tempfile::TempDir;
         
         let script_name = match stage {
             ScriptStage::PreInstall => "preinst",
@@ -275,8 +245,50 @@ impl PackageAdapter for DebAdapter {
             ScriptStage::PostRemove => "postrm",
         };
 
-        // to do: Extract and safely execute maintainer scripts
-        println!("Note: Debian {} script not executed", script_name);
+        // Extract control archive to temp directory
+        let temp_dir = TempDir::new()
+            .map_err(|e| format!("Failed to create temp directory: {}", e))?;
+        
+        let output = Command::new("dpkg-deb")
+            .args(&["--control", self.path.to_str().unwrap(), temp_dir.path().to_str().unwrap()])
+            .output()
+            .map_err(|e| format!("Failed to extract control: {}", e))?;
+        
+        if !output.status.success() {
+            return Err(format!("Failed to extract control scripts: {}", String::from_utf8_lossy(&output.stderr)));
+        }
+
+        let script_path = temp_dir.path().join(script_name);
+        
+        if !script_path.exists() {
+            return Ok(());
+        }
+
+        println!("Running Debian {} script...", script_name);
+        
+        // Make script executable
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&script_path)
+                .map_err(|e| format!("Failed to get script permissions: {}", e))?
+                .permissions();
+            perms.set_mode(0o700);
+            std::fs::set_permissions(&script_path, perms)
+                .map_err(|e| format!("Failed to set script permissions: {}", e))?;
+        }
+        
+        // Execute script
+        let output = Command::new(&script_path)
+            .arg("install")
+            .output()
+            .map_err(|e| format!("Failed to execute {} script: {}", script_name, e))?;
+        
+        if !output.status.success() {
+            eprintln!("Warning: {} script failed: {}", script_name, String::from_utf8_lossy(&output.stderr));
+        } else {
+            println!("{} script executed successfully", script_name);
+        }
         
         Ok(())
     }
