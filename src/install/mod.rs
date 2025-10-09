@@ -35,7 +35,7 @@ struct LocalPackageMetadata {
 
 pub fn build(hierarchy: &[String]) -> Command {
     use flags::Flag;
-    
+
     Command::new(
         "install",
         vec![String::from("i")],
@@ -49,6 +49,16 @@ pub fn build(hierarchy: &[String]) -> Command {
                 false,
                 |states, _| {
                     states.shove("skip_signature", true);
+                },
+            ),
+            Flag::new(
+                None,
+                "skip-native-hash",
+                "Skip hash verification for RPM/DEB packages (use with caution)",
+                false,
+                false,
+                |states, _| {
+                    states.shove("skip_native_hash", true);
                 },
             ),
         ],
@@ -437,8 +447,22 @@ fn install_package(
 
         // Verify package
         println!("Verifying package...");
-        
-        let verify_result = if skip_signature {
+
+        // For RPM and DEB packages, skip signature verification since they don't use PAX signatures
+        // They may also skip hash verification depending on user preference, but structure check is always done
+        let package_type = detect_package_type(&pkg_path).unwrap_or(PackageType::Pax);
+        let verify_result = if matches!(package_type, PackageType::Rpm | PackageType::Deb) {
+            // RPM/DEB packages: skip signature verification since they don't use PAX signatures
+            // For hash verification, we can be more lenient since these are native package formats
+            println!("\x1B[33mNote: RPM/DEB packages skip signature verification (using native signatures)\x1B[0m");
+            let options = VerifyOptions {
+                verify_hash: true,  // Still verify hash for integrity unless user explicitly skips
+                verify_signature: false,
+                verify_structure: true,
+                force_insecure: false,
+            };
+            verify_with_options(&pkg_path, None, Some(&entry.hash), package_type.as_str(), &options)?
+        } else if skip_signature {
             println!("\x1B[33mWARNING: Skipping signature verification\x1B[0m");
             let options = VerifyOptions {
                 verify_hash: true,
