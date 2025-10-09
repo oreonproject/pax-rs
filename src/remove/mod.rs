@@ -77,7 +77,7 @@ fn run(states: &StateBox, args: Option<&[String]>, purge: bool) -> PostAction {
             println!(
                 "\nThe following package(s) will be {msg}  \x1B[91m{}\x1B[0m",
                 metadatas
-                    .remove
+                    .primary
                     .iter()
                     .fold(String::new(), |acc, x| format!("{acc} {}", x.name))
                     .trim()
@@ -86,7 +86,7 @@ fn run(states: &StateBox, args: Option<&[String]>, purge: bool) -> PostAction {
                 println!(
                     "The following package(s) will be MODIFIED: \x1B[93m{}\x1B[0m",
                     metadatas
-                        .modify
+                        .secondary
                         .iter()
                         .fold(String::new(), |acc, x| format!("{acc} {}", x.name))
                         .trim()
@@ -105,7 +105,7 @@ fn run(states: &StateBox, args: Option<&[String]>, purge: bool) -> PostAction {
                     };
                 }
             }
-            for package in metadatas.remove {
+            for package in metadatas.primary {
                 match package.remove_version(purge) {
                     Ok(()) => (),
                     Err(message) => {

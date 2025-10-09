@@ -9,7 +9,7 @@ pub fn build(hierarchy: &[String]) -> Command {
         "update",
         vec![String::from("d")],
         "Downloads the upgrade metadata for non-phased packages.",
-        vec![utils::yes_flag()],
+        Vec::new(),
         None,
         run,
         hierarchy,

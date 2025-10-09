@@ -11,7 +11,7 @@ pub fn build(hierarchy: &[String]) -> Command {
         "install",
         vec![String::from("i")],
         "Install the application from a specified path",
-        Vec::new(),
+        vec![utils::specific_flag(), utils::yes_flag()],
         None,
         run,
         hierarchy,

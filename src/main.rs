@@ -13,6 +13,7 @@ pub mod endpoints_init;
 pub mod install;
 pub mod remove;
 pub mod update;
+pub mod upgrade;
 
 pub fn main() {
     let args: Vec<String> = env::args().collect();

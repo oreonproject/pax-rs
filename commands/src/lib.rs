@@ -269,9 +269,6 @@ impl Command {
     }
 
     fn handle_post_action(&self, action: PostAction) {
-        // if let Err(message) = remove_lock() {
-        //     println!("\x1B[91m{message}\x1B[0m");
-        // }
         let _ = remove_lock();
         match action {
             PostAction::Elevate => {

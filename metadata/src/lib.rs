@@ -102,7 +102,7 @@ async fn get_deps(
     Ok(deps)
 }
 
-#[derive(PartialEq, Eq, Serialize, Deserialize, Debug, Hash)]
+#[derive(PartialEq, Eq, Serialize, Deserialize, Debug, Hash, Clone)]
 pub struct ProcessedMetaData {
     pub name: String,
     pub kind: MetaDataKind,
@@ -116,7 +116,7 @@ pub struct ProcessedMetaData {
     pub hash: String,
 }
 
-#[derive(PartialEq, Eq, Serialize, Deserialize, Debug, Hash)]
+#[derive(PartialEq, Eq, Serialize, Deserialize, Debug, Hash, Clone)]
 pub enum ProcessedInstallKind {
     PreBuilt(PreBuilt),
     Compilable(ProcessedCompilable),
@@ -126,7 +126,7 @@ pub struct PreBuilt {
     pub critical: Vec<String>,
     pub configs: Vec<String>,
 }
-#[derive(PartialEq, Eq, Serialize, Deserialize, Debug, Hash)]
+#[derive(PartialEq, Eq, Serialize, Deserialize, Debug, Hash, Clone)]
 pub struct ProcessedCompilable {
     pub build: String,
     pub install: String,
@@ -216,7 +216,7 @@ impl ProcessedMetaData {
         };
         Ok(Some(tmpfile))
     }
-    pub async fn get_dep(&self, sources: &[String]) -> Result<Vec<ProcessedMetaData>, String> {
+    pub async fn get_dep(&self, sources: &[String]) -> Result<Vec<Self>, String> {
         let mut deps = Vec::new();
         // These are important to the build process, so they need to be installed prior to
         // installing the dependant, so they get pushed lower down the dependency Vec
@@ -261,6 +261,22 @@ impl ProcessedMetaData {
             Ok(_) => Ok(self),
             Err(_) => err!("Failed to write upgrade metadata file!"),
         }
+    }
+    pub fn open(name: &str) -> Result<Self, String> {
+        let mut path = get_update_dir()?;
+        path.push(format!("{}.yaml", name));
+        let mut file = match File::open(&path) {
+            Ok(file) => file,
+            Err(_) => return err!("Failed to read package `{name}`'s metadata!"),
+        };
+        let mut metadata = String::new();
+        if file.read_to_string(&mut metadata).is_err() {
+            return err!("Failed to read package `{name}`'s config!");
+        }
+        Ok(match serde_norway::from_str::<Self>(&metadata) {
+            Ok(data) => data,
+            Err(_) => return err!("Failed to parse package `{name}`'s data!"),
+        })
     }
 }
 
@@ -350,7 +366,6 @@ impl DependKind {
                 } else {
                     Err(latest.to_string())
                 }
-                // }
             }
             DependKind::Specific(Specific { name, version }) => {
                 if let Some(data) = get_metadata(name, Some(version), sources, true).await {
@@ -437,7 +452,7 @@ impl Specific {
         let data = InstalledMetaData::open(&self.name)?;
         if let Some(data) = data.installed.iter().find(|x| x.version == self.version) {
             for dependent in &data.dependents {
-                if queued.insert_rem(dependent.clone()) {
+                if queued.insert_primary(dependent.clone()) {
                     dependent.get_dependents(queued)?;
                 }
             }
@@ -569,12 +584,10 @@ impl InstalledMetaData {
         if file.read_to_string(&mut metadata).is_err() {
             return err!("Failed to read package `{name}`'s config!");
         }
-        Ok(
-            match serde_norway::from_str::<InstalledMetaData>(&metadata) {
-                Ok(data) => data,
-                Err(_) => return err!("Failed to parse package `{name}`'s data!"),
-            },
-        )
+        Ok(match serde_norway::from_str::<Self>(&metadata) {
+            Ok(data) => data,
+            Err(_) => return err!("Failed to parse package `{name}`'s data!"),
+        })
     }
     pub fn write(self, path: &Path) -> Result<Option<Self>, String> {
         if self.installed.is_empty() {
@@ -815,10 +828,10 @@ async fn get_local_dep(
             ))
             .await?;
             result.extend(items);
-            result.insert_mod(dependency.clone());
+            result.insert_secondary(dependency.clone());
         }
         if root {
-            result.insert_rem(Specific {
+            result.insert_primary(Specific {
                 name: data.name.to_string(),
                 version: version.version.to_string(),
             });
@@ -829,36 +842,36 @@ async fn get_local_dep(
 
 #[derive(Debug)]
 pub struct QueuedChanges {
-    pub remove: HashSet<Specific>,
-    pub modify: HashSet<Specific>,
+    pub primary: HashSet<Specific>,
+    pub secondary: HashSet<Specific>,
 }
 
 impl QueuedChanges {
     pub fn new() -> Self {
         QueuedChanges {
-            remove: HashSet::new(),
-            modify: HashSet::new(),
+            primary: HashSet::new(),
+            secondary: HashSet::new(),
         }
     }
     pub fn extend(&mut self, other: Self) {
-        self.remove.extend(other.remove);
-        self.modify.extend(other.modify);
+        self.primary.extend(other.primary);
+        self.secondary.extend(other.secondary);
     }
-    pub fn insert_mod(&mut self, other: Specific) {
-        self.modify.insert(other);
+    pub fn insert_primary(&mut self, other: Specific) -> bool {
+        self.primary.insert(other)
     }
-    pub fn insert_rem(&mut self, other: Specific) -> bool {
-        self.remove.insert(other)
+    pub fn insert_secondary(&mut self, other: Specific) {
+        self.secondary.insert(other);
     }
     pub fn is_empty(&self) -> bool {
-        self.remove.is_empty()
+        self.primary.is_empty()
     }
     pub fn has_deps(&self) -> bool {
-        !self.modify.is_empty()
+        !self.secondary.is_empty()
     }
     pub fn dependents(&mut self) -> Result<(), String> {
-        let mut items = self.remove.iter().cloned().collect::<Vec<Specific>>();
-        items.extend_from_slice(&self.modify.iter().cloned().collect::<Vec<Specific>>());
+        let mut items = self.primary.iter().cloned().collect::<Vec<Specific>>();
+        items.extend_from_slice(&self.secondary.iter().cloned().collect::<Vec<Specific>>());
         for item in items {
             item.get_dependents(self)?;
         }
@@ -872,7 +885,7 @@ impl Default for QueuedChanges {
     }
 }
 /* #endregion Remove/Purge */
-/* #region Upgrade */
+/* #region Update */
 pub async fn collect_upgrades() -> Result<(), String> {
     let settings = SettingsYaml::get_settings()?;
     print!("\x1B[2K\rReading package lists... 0%");
@@ -933,7 +946,7 @@ async fn collect_upgrade(
     }
     Ok(result)
 }
-/* #endregion Upgrade */
+/* #endregion Update */
 /* #region Emancipate */
 pub fn emancipate(data: &[(&String, Option<&String>)]) -> Result<(), String> {
     for bit in data {
@@ -979,3 +992,52 @@ pub fn emancipate(data: &[(&String, Option<&String>)]) -> Result<(), String> {
     Ok(())
 }
 /* #endregion Emancipate */
+/* #region Upgrade */
+pub fn upgrade_all() -> Result<Vec<ProcessedMetaData>, String> {
+    let path = get_metadata_dir()?;
+    let dir = match fs::read_dir(&path) {
+        Ok(dir) => dir,
+        Err(_) => {
+            return err!("Failed to read {} as a directory!", path.display());
+        }
+    };
+    let mut result = Vec::new();
+    for file in dir.flatten() {
+        let path = file.path();
+        if path.extension().is_none_or(|x| x != "yaml")
+            && let Some(name) = path.file_prefix()
+        {
+            let name = name.to_string_lossy();
+            result.push(ProcessedMetaData::open(&name)?);
+        }
+    }
+    Ok(result)
+}
+
+pub fn upgrade_only(pkgs: &[(&String, Option<&String>)]) -> Result<Vec<ProcessedMetaData>, String> {
+    let base = upgrade_all()?;
+    let base = base.iter();
+    let mut result = HashSet::new();
+    for pkg in pkgs {
+        let (pkg, ver) = *pkg;
+        if let Some(ver) = ver {
+            let found = base
+                .as_ref()
+                .iter()
+                .filter(|x| x.name == *pkg && x.version == *ver)
+                .cloned()
+                .collect::<Vec<ProcessedMetaData>>();
+            result.extend(found);
+        } else {
+            let found = base
+                .as_ref()
+                .iter()
+                .filter(|x| x.name == *pkg)
+                .cloned()
+                .collect::<Vec<ProcessedMetaData>>();
+            result.extend(found);
+        }
+    }
+    Ok(result.into_iter().collect())
+}
+/* #endregion Upgrade */
