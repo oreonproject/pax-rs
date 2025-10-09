@@ -1,5 +1,5 @@
 use metadata::emancipate;
-use utils::is_root;
+use settings::acquire_lock;
 
 use crate::{Command, PostAction, StateBox};
 
@@ -17,8 +17,13 @@ pub fn build(hierarchy: &[String]) -> Command {
 }
 
 fn run(states: &StateBox, args: Option<&[String]>) -> PostAction {
-    if !is_root() {
-        return PostAction::Elevate;
+    match acquire_lock() {
+        Ok(Some(action)) => return action,
+        Err(fault) => {
+            println!("\x1B[91m{fault}\x1B[0m");
+            return PostAction::Return;
+        }
+        _ => (),
     }
     let mut args = match args {
         None => return PostAction::NothingToDo,

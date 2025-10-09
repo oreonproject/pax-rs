@@ -1,7 +1,7 @@
 use crate::{Command, Flag, PostAction, StateBox};
-use settings::{get_settings, set_settings};
+use settings::SettingsYaml;
+use settings::acquire_lock;
 use tokio::runtime::Runtime;
-use utils::is_root;
 
 static LONG_NAME: &str = "force";
 
@@ -28,8 +28,14 @@ pub fn build(hierarchy: &[String]) -> Command {
 }
 
 fn get_endpoints(states: &StateBox, _args: Option<&[String]>) -> PostAction {
-    if !is_root() {
-        return PostAction::Elevate;
+    match acquire_lock() {
+        Ok(Some(PostAction::PullSources)) => (),
+        Ok(Some(action)) => return action,
+        Err(fault) => {
+            println!("\x1B[91m{fault}\x1B[0m");
+            return PostAction::Return;
+        }
+        _ => (),
     }
     if states.get::<bool>("force").is_none_or(|x| !*x) {
         println!(
@@ -73,12 +79,12 @@ async fn get_sources() -> Option<String> {
 }
 
 fn write_sources(sources: Option<String>) -> Result<(), String> {
-    let mut settings = get_settings()?;
+    let mut settings = SettingsYaml::get_settings()?;
     settings.sources = sources
         .unwrap_or_default()
         .trim()
         .split('\n')
         .map(|x| x.to_string())
         .collect();
-    set_settings(settings)
+    settings.set_settings()
 }

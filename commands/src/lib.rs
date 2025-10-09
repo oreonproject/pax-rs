@@ -1,23 +1,14 @@
 use std::{env, io::Write, iter::once, process::Command as RunCommand, slice::Iter};
 
 use flags::Flag;
+use settings::remove_lock;
 use statebox::StateBox;
-use utils::choice;
+use utils::{PostAction, choice};
 
 // Helper return enum for handlers
 enum HandlerResult {
     ContinueOuter,
     ReturnEarly,
-}
-
-// The action to perform once a command has run
-pub enum PostAction {
-    Elevate,
-    Err(i32),
-    GetHelp,
-    NothingToDo,
-    PullSources,
-    Return,
 }
 
 // Extraction of complex type
@@ -161,6 +152,9 @@ impl Command {
         } else {
             m_self.handle_post_action((m_self.run_func)(&m_self.states, None));
         }
+        // if let Err(message) = remove_lock() {
+        //     println!("\x1B[91m{message}\x1B[0m");
+        // }
     }
 
     fn handle_long_flag(
@@ -275,20 +269,27 @@ impl Command {
     }
 
     fn handle_post_action(&self, action: PostAction) {
+        // if let Err(message) = remove_lock() {
+        //     println!("\x1B[91m{message}\x1B[0m");
+        // }
+        let _ = remove_lock();
         match action {
             PostAction::Elevate => {
-                println!("The action you attempted to perform requires root privileges.");
+                println!(
+                    "\x1B[91mThe action you attempted to perform requires root privileges.\x1B[0m"
+                );
                 match choice("Would you like to try perform this action as sudo?", false) {
                     Err(message) => println!("{message}"),
                     Ok(true) => {
                         println!("Attempting to elevate execution...");
                         let _ = std::io::stdout().flush();
                         let mut cmd = RunCommand::new("sudo");
-                        if cmd.args(env::args()).status().is_err() {
-                            println!("Failed to acquire sudo!");
+                        match cmd.args(env::args()).status() {
+                            Ok(status) => std::process::exit(status.code().unwrap_or_default()),
+                            Err(_) => println!("Failed to acquire sudo!"),
                         }
                     }
-                    Ok(false) => (),
+                    Ok(false) => println!("\x1B[91mAbort.\x1B[0m"),
                 }
             }
             PostAction::Err(code) => std::process::exit(code),
@@ -303,13 +304,18 @@ impl Command {
                         let program = args.next();
                         if let Some(program) = program {
                             let mut cmd = RunCommand::new(program);
-                            if cmd.args(["pax-init", "--force"]).status().is_err() {
+                            if !cmd
+                                .args(["pax-init", "--force"])
+                                .status()
+                                .is_ok_and(|x| x.code() == Some(0))
+                            {
                                 println!("Failed to re-execute!");
                                 return;
                             }
                             let mut cmd = RunCommand::new(program);
-                            if cmd.args(args).status().is_err() {
-                                println!("Failed to re-execute!");
+                            match cmd.args(args).status() {
+                                Ok(status) => std::process::exit(status.code().unwrap_or_default()),
+                                Err(_) => println!("Failed to re-execute!"),
                             }
                         } else {
                             println!("Failed to locate program!");

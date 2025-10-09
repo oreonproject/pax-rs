@@ -1,6 +1,6 @@
 use semver::Version;
 use serde::{Deserialize, Serialize};
-use settings::get_settings;
+use settings::SettingsYaml;
 use std::hash::Hash;
 use std::{
     collections::HashSet,
@@ -874,7 +874,7 @@ impl Default for QueuedChanges {
 /* #endregion Remove/Purge */
 /* #region Upgrade */
 pub async fn collect_upgrades() -> Result<(), String> {
-    let settings = get_settings()?;
+    let settings = SettingsYaml::get_settings()?;
     print!("\x1B[2K\rReading package lists... 0%");
     let path = get_metadata_dir()?;
     let dir = match fs::read_dir(&path) {

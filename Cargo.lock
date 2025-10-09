@@ -89,6 +89,7 @@ name = "commands"
 version = "0.1.0"
 dependencies = [
  "flags",
+ "settings",
  "statebox",
  "utils",
 ]

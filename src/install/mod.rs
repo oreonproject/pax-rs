@@ -1,8 +1,8 @@
 use metadata::{MetaDataKind, build_deps};
-use settings::get_settings;
+use settings::SettingsYaml;
+use settings::acquire_lock;
 use std::{collections::HashSet, fs};
 use tokio::runtime::Runtime;
-use utils::is_root;
 
 use crate::{Command, PostAction, StateBox};
 
@@ -19,18 +19,26 @@ pub fn build(hierarchy: &[String]) -> Command {
 }
 
 fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
-    if !is_root() {
-        return PostAction::Elevate;
+    match acquire_lock() {
+        Ok(Some(action)) => return action,
+        Err(fault) => {
+            println!("\x1B[91m{fault}\x1B[0m");
+            return PostAction::Return;
+        }
+        _ => (),
     }
     let args = match args {
         None => return PostAction::NothingToDo,
         Some(args) => args,
     };
     print!("Reading sources...");
-    let sources = match get_settings() {
+    let sources = match SettingsYaml::get_settings() {
         Ok(settings) => settings.sources,
         Err(_) => return PostAction::PullSources,
     };
+    if sources.is_empty() {
+        return PostAction::PullSources;
+    }
     let runtime = match Runtime::new() {
         Ok(runtime) => runtime,
         Err(_) => {

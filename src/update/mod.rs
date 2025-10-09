@@ -1,6 +1,6 @@
 use metadata::collect_upgrades;
+use settings::acquire_lock;
 use tokio::runtime::Runtime;
-use utils::is_root;
 
 use crate::{Command, PostAction, StateBox};
 
@@ -17,8 +17,13 @@ pub fn build(hierarchy: &[String]) -> Command {
 }
 
 fn run(_states: &StateBox, _args: Option<&[String]>) -> PostAction {
-    if !is_root() {
-        return PostAction::Elevate;
+    match acquire_lock() {
+        Ok(Some(action)) => return action,
+        Err(fault) => {
+            println!("\x1B[91m{fault}\x1B[0m");
+            return PostAction::Return;
+        }
+        _ => (),
     }
     let runtime = match Runtime::new() {
         Ok(runtime) => runtime,

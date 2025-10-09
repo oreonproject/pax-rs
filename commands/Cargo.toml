@@ -7,3 +7,4 @@ edition = "2024"
 flags.workspace = true
 statebox.workspace = true
 utils.workspace = true
+settings.workspace = true

@@ -1,11 +1,11 @@
 use std::{env, path::Path};
 
 pub use {
-    commands::{Command, PostAction},
+    commands::Command,
     flags::Flag,
     settings::SettingsYaml,
     statebox::StateBox,
-    utils::err,
+    utils::{PostAction, err},
 };
 
 pub mod emancipate;

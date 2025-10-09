@@ -3,6 +3,16 @@ use std::{fs::DirBuilder, io::Write, path::PathBuf, process::Command};
 use flags::Flag;
 use nix::unistd;
 
+// The action to perform once a command has run
+pub enum PostAction {
+    Elevate,
+    Err(i32),
+    GetHelp,
+    NothingToDo,
+    PullSources,
+    Return,
+}
+
 pub fn get_dir() -> Result<PathBuf, String> {
     let path = PathBuf::from("/etc/pax");
     if !path.exists() && DirBuilder::new().create(&path).is_err() {

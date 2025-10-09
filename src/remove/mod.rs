@@ -1,6 +1,7 @@
 use metadata::get_local_deps;
+use settings::acquire_lock;
 use tokio::runtime::Runtime;
-use utils::{choice, is_root};
+use utils::choice;
 
 use crate::{Command, PostAction, StateBox};
 
@@ -37,8 +38,13 @@ fn purge(states: &StateBox, args: Option<&[String]>) -> PostAction {
 }
 
 fn run(states: &StateBox, args: Option<&[String]>, purge: bool) -> PostAction {
-    if !is_root() {
-        return PostAction::Elevate;
+    match acquire_lock() {
+        Ok(Some(action)) => return action,
+        Err(fault) => {
+            println!("\x1B[91m{fault}\x1B[0m");
+            return PostAction::Return;
+        }
+        _ => (),
     }
     let mut args = match args {
         None => return PostAction::NothingToDo,
