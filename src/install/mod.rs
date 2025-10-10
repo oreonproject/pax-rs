@@ -12,7 +12,7 @@ use crate::repository::{create_client_from_settings, PackageEntry};
 use crate::resolver::{DependencyResolver, PackageInfo};
 use crate::store::PackageStore;
 use crate::symlinks::SymlinkManager;
-use crate::verify::{verify_package, verify_with_options, VerifyOptions};
+use crate::verify::{verify_with_options, VerifyOptions};
 use crate::{Command, PostAction, StateBox};
 use nix::unistd;
 use settings::{get_settings_or_local};
@@ -43,22 +43,12 @@ pub fn build(hierarchy: &[String]) -> Command {
         vec![
             Flag::new(
                 None,
-                "skip-signature",
-                "Skip signature verification (use with caution)",
+                "skip-hash",
+                "Skip hash verification (use with caution)",
                 false,
                 false,
                 |states, _| {
-                    states.shove("skip_signature", true);
-                },
-            ),
-            Flag::new(
-                None,
-                "skip-native-hash",
-                "Skip hash verification for RPM/DEB packages (use with caution)",
-                false,
-                false,
-                |states, _| {
-                    states.shove("skip_native_hash", true);
+                    states.shove("skip_hash", true);
                 },
             ),
         ],
@@ -75,8 +65,8 @@ fn run(states: &StateBox, args: Option<&[String]>) -> PostAction {
         return PostAction::Elevate;
     }
 
-    // Check if signature verification should be skipped
-    let skip_signature = states.get::<bool>("skip_signature").copied().unwrap_or(false);
+    // Check if hash verification should be skipped
+    let skip_hash = states.get::<bool>("skip_hash").copied().unwrap_or(false);
 
     let args = match args {
         None => {
@@ -364,7 +354,7 @@ fn run(states: &StateBox, args: Option<&[String]>) -> PostAction {
             &db,
             &provides_mgr,
             &symlink_mgr,
-            skip_signature,
+            skip_hash,
         ) {
             overall_progress.finish_and_clear();
             println!("Failed to install {}: {}", pkg.name, e);
@@ -398,7 +388,7 @@ fn install_package(
     db: &Database,
     provides_mgr: &ProvidesManager,
     symlink_mgr: &SymlinkManager,
-    skip_signature: bool,
+    skip_hash: bool,
 ) -> Result<(), String> {
     // Skip if already installed
     if db.is_installed(pkg_name)
@@ -432,17 +422,11 @@ fn install_package(
         }
 
         println!("Downloading {} from {}...", pkg_name, entry.download_url);
-        let pkg_path = downloader.download_package(
+        let pkg_path = downloader.download_package_with_hash(
             &entry.download_url,
             pkg_name,
             &entry.version,
-        )?;
-
-        // Download signature
-        let sig_path = downloader.download_signature(
-            &entry.signature_url,
-            pkg_name,
-            &entry.version,
+            Some(&entry.hash),
         )?;
 
         // Verify package
@@ -456,23 +440,21 @@ fn install_package(
             // For hash verification, we can be more lenient since these are native package formats
             println!("\x1B[33mNote: RPM/DEB packages skip signature verification (using native signatures)\x1B[0m");
             let options = VerifyOptions {
-                verify_hash: true,  // Still verify hash for integrity unless user explicitly skips
+                verify_hash: !skip_hash,  // Skip hash verification if user requested
                 verify_signature: false,
                 verify_structure: true,
                 force_insecure: false,
             };
-            verify_with_options(&pkg_path, None, Some(&entry.hash), package_type.as_str(), &options)?
-        } else if skip_signature {
-            println!("\x1B[33mWARNING: Skipping signature verification\x1B[0m");
-            let options = VerifyOptions {
-                verify_hash: true,
-                verify_signature: false,
-                verify_structure: true,
-                force_insecure: false,
-            };
-            verify_with_options(&pkg_path, Some(&sig_path), Some(&entry.hash), "pax", &options)?
+            verify_with_options(&pkg_path, Some(&entry.hash), package_type.as_str(), &options)?
         } else {
-            verify_package(&pkg_path, &sig_path, &entry.hash)?
+            // PAX packages: verify hash and structure only
+            let options = VerifyOptions {
+                verify_hash: !skip_hash,
+                verify_signature: false,
+                verify_structure: true,
+                force_insecure: false,
+            };
+            verify_with_options(&pkg_path, Some(&entry.hash), "pax", &options)?
         };
 
         if !verify_result.is_valid() {

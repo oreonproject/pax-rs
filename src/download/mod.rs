@@ -1,7 +1,7 @@
 use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::blocking::Client;
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -45,13 +45,43 @@ impl DownloadManager {
         package_name: &str,
         version: &str,
     ) -> Result<PathBuf, String> {
-        let filename = format!("{}-{}.pkg", package_name, version);
+        self.download_package_with_hash(url, package_name, version, None)
+    }
+
+    // Download a package file with optional hash verification
+    pub fn download_package_with_hash(
+        &self,
+        url: &str,
+        package_name: &str,
+        version: &str,
+        expected_hash: Option<&str>,
+    ) -> Result<PathBuf, String> {
+        let filename = format!("{}-{}.pax", package_name, version);
         let dest_path = self.cache_dir.join(&filename);
 
-        // Check if already cached
+        // Check if already cached and validate hash if provided
         if dest_path.exists() {
-            println!("Using cached package: {}", filename);
-            return Ok(dest_path);
+            if let Some(hash) = expected_hash {
+                use crate::crypto;
+                match crypto::verify_sha256(&dest_path, hash) {
+                    Ok(true) => {
+                        println!("Using cached package: {}", filename);
+                        return Ok(dest_path);
+                    }
+                    Ok(false) => {
+                        println!("Cached package hash mismatch, re-downloading...");
+                        fs::remove_file(&dest_path)
+                            .map_err(|e| format!("Failed to remove invalid cache file: {}", e))?;
+                    }
+                    Err(e) => {
+                        println!("Failed to verify cached package ({}), re-downloading...", e);
+                        fs::remove_file(&dest_path).ok();
+                    }
+                }
+            } else {
+                println!("Using cached package: {}", filename);
+                return Ok(dest_path);
+            }
         }
 
         println!("Downloading {} from {}...", package_name, url);
@@ -114,39 +144,6 @@ impl DownloadManager {
         Ok(dest_path)
     }
 
-    // Download signature file
-    pub fn download_signature(
-        &self,
-        url: &str,
-        package_name: &str,
-        version: &str,
-    ) -> Result<PathBuf, String> {
-        let filename = format!("{}-{}.sig", package_name, version);
-        let dest_path = self.cache_dir.join(&filename);
-
-        // Check if already cached
-        if dest_path.exists() {
-            return Ok(dest_path);
-        }
-
-        println!("Downloading signature...");
-
-        let mut response = self.client.get(url)
-            .send()
-            .map_err(|e| format!("Failed to download signature: {}", e))?;
-
-        if !response.status().is_success() {
-            return Err(format!("Signature download failed: {}", response.status()));
-        }
-
-        let mut file = File::create(&dest_path)
-            .map_err(|e| format!("Failed to create signature file: {}", e))?;
-
-        io::copy(&mut response, &mut file)
-            .map_err(|e| format!("Failed to write signature: {}", e))?;
-
-        Ok(dest_path)
-    }
 
     // Clear cache
     pub fn clear_cache(&self) -> Result<(), String> {

@@ -3,7 +3,7 @@ use crate::download::DownloadManager;
 use crate::repository::create_client_from_settings;
 use crate::store::PackageStore;
 use crate::symlinks::SymlinkManager;
-use crate::verify::{verify_package, verify_with_options, VerifyOptions};
+use crate::verify::{verify_with_options, VerifyOptions};
 use crate::{Command, PostAction, StateBox};
 use nix::unistd;
 use settings::{get_settings_or_local};
@@ -20,12 +20,12 @@ pub fn build(hierarchy: &[String]) -> Command {
         vec![
             Flag::new(
                 None,
-                "skip-signature",
-                "Skip signature verification (use with caution)",
+                "skip-hash",
+                "Skip hash verification (use with caution)",
                 false,
                 false,
                 |states, _| {
-                    states.shove("skip_signature", true);
+                    states.shove("skip_hash", true);
                 },
             ),
         ],
@@ -42,8 +42,8 @@ fn run(states: &StateBox, _args: Option<&[String]>) -> PostAction {
         return PostAction::Elevate;
     }
 
-    // Check if signature verification should be skipped
-    let skip_signature = states.get::<bool>("skip_signature").copied().unwrap_or(false);
+    // Check if hash verification should be skipped
+    let skip_hash = states.get::<bool>("skip_hash").copied().unwrap_or(false);
 
     // load settings - use local-only settings if endpoints.txt doesn't exist
     let settings = match get_settings_or_local() {
@@ -145,7 +145,7 @@ fn run(states: &StateBox, _args: Option<&[String]>) -> PostAction {
             &store,
             &db,
             &symlink_mgr,
-            skip_signature,
+            skip_hash,
         ) {
             println!("Failed to update {}: {}", pkg_name, e);
             println!("Update aborted");
@@ -171,7 +171,7 @@ fn update_package(
     store: &PackageStore,
     db: &Database,
     symlink_mgr: &SymlinkManager,
-    skip_signature: bool,
+    skip_hash: bool,
 ) -> Result<(), String> {
     println!("\nUpdating {}...", pkg_name);
 
@@ -199,27 +199,17 @@ fn update_package(
         &entry.version,
     )?;
 
-    let sig_path = downloader.download_signature(
-        &entry.signature_url,
-        pkg_name,
-        &entry.version,
-    )?;
 
     // verify
     println!("Verifying package...");
     
-    let verify_result = if skip_signature {
-        println!("\x1B[33mWARNING: Skipping signature verification\x1B[0m");
-        let options = VerifyOptions {
-            verify_hash: true,
-            verify_signature: false,
-            verify_structure: true,
-            force_insecure: false,
-        };
-        verify_with_options(&pkg_path, Some(&sig_path), Some(&entry.hash), "pax", &options)?
-    } else {
-        verify_package(&pkg_path, &sig_path, &entry.hash)?
+    let options = VerifyOptions {
+        verify_hash: !skip_hash,
+        verify_signature: false,
+        verify_structure: true,
+        force_insecure: false,
     };
+    let verify_result = verify_with_options(&pkg_path, Some(&entry.hash), "pax", &options)?;
     
     if !verify_result.is_valid() {
         return Err(format!("Verification failed: {}", verify_result.error_message()));

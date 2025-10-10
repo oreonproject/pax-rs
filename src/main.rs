@@ -29,7 +29,6 @@ pub mod search;
 pub mod store;
 pub mod symlinks;
 pub mod transaction;
-pub mod trust;
 pub mod update;
 pub mod verify;
 
@@ -62,7 +61,6 @@ pub fn main() {
             list::build,
             clean::build,
             compile::build,
-            trust::build,
         ]),
         |_command, _args| PostAction::GetHelp,
         &[],

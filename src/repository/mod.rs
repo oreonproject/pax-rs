@@ -46,6 +46,7 @@ pub struct PackageEntry {
     pub hash: String,
     pub size: u64,
     pub download_url: String,
+    #[serde(default)]
     pub signature_url: String,
 }
 
@@ -162,9 +163,23 @@ impl RepositoryClient {
     // Search for a package across all repositories (tries all repos for fallback)
     pub fn search_package(&self, name: &str) -> Result<Option<(String, PackageEntry)>, String> {
         let indexes = self.fetch_all_indexes();
+        let system_arch = get_system_arch();
 
         // Try each repository in order, fallback to next if not found
         for (source, index) in indexes {
+            // First, try to find a package that matches the system architecture
+            for mut package in index.packages.iter().filter(|p| {
+                p.name == name && (p.architecture.is_none() || p.architecture.as_ref() == Some(&system_arch))
+            }).cloned() {
+                // Convert relative URLs to absolute URLs by prefixing with source
+                if !package.download_url.starts_with("http://") && !package.download_url.starts_with("https://") {
+                    package.download_url = format!("{}{}", source, package.download_url);
+                }
+                // signature_url is not used anymore since we removed signature support
+                return Ok(Some((source, package)));
+            }
+
+            // If no architecture match found, fallback to any version of the package
             for mut package in index.packages {
                 if package.name == name {
                     // Convert relative URLs to absolute URLs by prefixing with source
@@ -185,8 +200,22 @@ impl RepositoryClient {
     // Search for a package with specific version, tries all repos
     pub fn search_package_version(&self, name: &str, version: &str) -> Result<Option<(String, PackageEntry)>, String> {
         let indexes = self.fetch_all_indexes();
+        let system_arch = get_system_arch();
 
         for (source, index) in indexes {
+            // First, try to find a package that matches the system architecture and version
+            for mut package in index.packages.iter().filter(|p| {
+                p.name == name && p.version == version && (p.architecture.is_none() || p.architecture.as_ref() == Some(&system_arch))
+            }).cloned() {
+                // Convert relative URLs to absolute URLs by prefixing with source
+                if !package.download_url.starts_with("http://") && !package.download_url.starts_with("https://") {
+                    package.download_url = format!("{}{}", source, package.download_url);
+                }
+                // signature_url is not used anymore since we removed signature support
+                return Ok(Some((source, package)));
+            }
+
+            // If no architecture match found, try any version of the specific package
             for mut package in index.packages {
                 if package.name == name && package.version == version {
                     // Convert relative URLs to absolute URLs by prefixing with source
@@ -200,7 +229,7 @@ impl RepositoryClient {
                 }
             }
         }
-        
+
         // Fallback: if specific version not found, try any version
         self.search_package(name)
     }

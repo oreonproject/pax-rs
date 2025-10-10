@@ -39,15 +39,14 @@ impl VerificationResult {
     }
 }
 
-// Verify a package with all checks
+// Verify a package hash only (no signatures)
 pub fn verify_package<P: AsRef<Path>>(
     package_path: P,
-    signature_path: P,
     expected_hash: &str,
 ) -> Result<VerificationResult, String> {
     let mut result = VerificationResult {
         hash_valid: false,
-        signature_valid: false,
+        signature_valid: true, // Always true since we don't check signatures
         errors: Vec::new(),
     };
 
@@ -65,23 +64,6 @@ pub fn verify_package<P: AsRef<Path>>(
         Err(e) => {
             result.errors.push(format!("Failed to verify hash: {}", e));
             println!("  Hash: ERROR");
-        }
-    }
-
-    // verify signature
-    println!("Verifying package signature...");
-    match crypto::verify_with_trusted_keys(&package_path, &signature_path) {
-        Ok(true) => {
-            result.signature_valid = true;
-            println!("  Signature: OK");
-        }
-        Ok(false) => {
-            result.errors.push("Signature verification failed".to_string());
-            println!("  Signature: FAILED");
-        }
-        Err(e) => {
-            result.errors.push(format!("Failed to verify signature: {}", e));
-            println!("  Signature: ERROR");
         }
     }
 
@@ -214,17 +196,16 @@ impl Default for VerifyOptions {
     }
 }
 
-// Verify with custom options
+// Verify with custom options (hash and structure only, no signatures)
 pub fn verify_with_options<P: AsRef<Path>>(
     package_path: P,
-    signature_path: Option<P>,
     expected_hash: Option<&str>,
     package_type: &str,
     options: &VerifyOptions,
 ) -> Result<VerificationResult, String> {
     let mut result = VerificationResult {
         hash_valid: !options.verify_hash,  // if not verifying, consider it valid
-        signature_valid: !options.verify_signature,
+        signature_valid: !options.verify_signature, // Always valid since we don't check signatures
         errors: Vec::new(),
     };
 
@@ -268,25 +249,7 @@ pub fn verify_with_options<P: AsRef<Path>>(
         }
     }
 
-    // Verify signature
-    if options.verify_signature {
-        if let Some(sig_path) = signature_path {
-            match crypto::verify_with_trusted_keys(&package_path, &sig_path) {
-                Ok(true) => {
-                    result.signature_valid = true;
-                    println!("  Signature: OK");
-                }
-                Ok(false) => {
-                    result.errors.push("Invalid signature".to_string());
-                    println!("  Signature: FAILED");
-                }
-                Err(e) => {
-                    result.errors.push(format!("Signature verification error: {}", e));
-                    println!("  Signature: ERROR");
-                }
-            }
-        }
-    }
+    // Signature verification is always skipped (signature_valid is preset to true)
 
     Ok(result)
 }
