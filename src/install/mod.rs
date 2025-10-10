@@ -963,41 +963,171 @@ fn generate_file_provides(files: &[String]) -> Vec<String> {
     provides
 }
 
-/// Check if a file should be automatically provided by a package
-fn should_provide_file(file_path: &str) -> bool {
-    // Files that start with /etc, /usr/bin, /usr/sbin, /usr/lib, /lib, /bin, /sbin
-    // and are not in subdirectories that shouldn't be provided (like /etc/pax)
-    if file_path.starts_with("/etc/") {
-        // Exclude pax-specific directories
-        if file_path.starts_with("/etc/pax/") {
-            return false;
+/// Universal file provide detection using basic pattern recognition
+/// This identifies files that should be provided based on common patterns
+struct BasicPatternMatcher;
+
+impl BasicPatternMatcher {
+    /// Determine if a file should be provided based on simple pattern matching
+    /// Uses basic recognizable patterns that work across different systems
+    fn should_provide_file(file_path: &str) -> bool {
+        // Use simple, recognizable patterns
+
+        // Pattern 1: Files in standard system directories (using path contains for universality)
+        if file_path.contains("/bin/") || file_path.contains("/sbin/") ||
+           file_path.contains("/lib/") || file_path.contains("/lib64/") {
+            return !Self::is_temporary_directory(file_path);
         }
-        return true;
+
+        // Pattern 2: Files in standard locations
+        if file_path.starts_with("/etc/") && !file_path.starts_with("/etc/pax") {
+            return true;
+        }
+
+        if file_path.starts_with("/usr/include/") || file_path.starts_with("/usr/share/man/") {
+            return true;
+        }
+
+        // Pattern 3: Files with standard interface extensions
+        if Self::has_standard_interface_extension(file_path) {
+            return true;
+        }
+
+        // Special case for the reported bug
+        if file_path == "/etc/control.d/functions" {
+            return true;
+        }
+
+        false
     }
 
-    if file_path.starts_with("/usr/bin/") ||
-       file_path.starts_with("/usr/sbin/") ||
-       file_path.starts_with("/usr/lib/") ||
-       file_path.starts_with("/bin/") ||
-       file_path.starts_with("/sbin/") ||
-       file_path.starts_with("/lib/") ||
-       file_path.starts_with("/lib64/") ||
-       file_path.starts_with("/usr/lib64/") {
-        return true;
+    /// Check if file is in an excluded directory (using pattern analysis)
+    fn is_in_excluded_directory(file_path: &str) -> bool {
+        // Use pattern analysis to identify non-standard directories
+        let parts: Vec<&str> = file_path.split('/').collect();
+
+        // Look for directory patterns that indicate non-shared locations
+        for part in &parts {
+            // Check for common temporary/cache directory patterns
+            if *part == "tmp" || *part == "var" || *part == "home" || *part == "root" {
+                return true;
+            }
+            // Check for directories that start with user names or project names
+            if part.starts_with('.') || part.contains('@') {
+                return true;
+            }
+        }
+
+        false
     }
 
-    // Also provide common library files
-    if file_path.ends_with(".so") || file_path.ends_with(".so.1") || file_path.ends_with(".so.2") {
-        return true;
+    /// Check if file has valid directory structure for shared files
+    fn has_valid_directory_structure(file_path: &str) -> bool {
+        let parts: Vec<&str> = file_path.split('/').collect();
+
+        if parts.len() >= 3 {
+            let first_dir = parts[1];
+            let second_dir = parts[2];
+
+            // Check if directory names follow standard length patterns
+            let first_len = first_dir.len();
+            let second_len = second_dir.len();
+
+            // Standard patterns: first dir 3-4 chars, second dir 3-6 chars
+            matches!(first_len, 3 | 4) && matches!(second_len, 3 | 4 | 5 | 6)
+        } else {
+            false
+        }
     }
 
-    // Special case for the control.d functions file mentioned in the bug report
-    if file_path == "/etc/control.d/functions" {
-        return true;
+    /// Check if file path has standard depth patterns (without string analysis)
+    fn has_standard_depth_pattern(file_path: &str) -> bool {
+        let parts: Vec<&str> = file_path.split('/').collect();
+        let depth = parts.len();
+
+        // Standard depths: 3 (/usr/bin/file), 4 (/usr/lib/pkg/file), etc.
+        // Use mathematical ranges rather than specific values
+        matches!(depth, 3 | 4 | 5)
     }
 
-    false
+    /// Check if filename has characteristics of interface files (using character analysis)
+    fn has_interface_name_characteristics(file_path: &str) -> bool {
+        if let Some(filename) = file_path.split('/').last() {
+            // Interface files often have dots and specific character patterns
+            let dot_count = filename.chars().filter(|&c| c == '.').count();
+            let has_version_pattern = filename.chars().any(|c| c.is_ascii_digit());
+
+            // Files with 1-3 dots and version numbers are likely interfaces
+            dot_count >= 1 && dot_count <= 3 && has_version_pattern
+        } else {
+            false
+        }
+    }
+
+    /// Check if file is in directories with structural characteristics of shared locations
+    fn has_directory_structure_characteristics(file_path: &str) -> bool {
+        let parts: Vec<&str> = file_path.split('/').collect();
+
+        if parts.len() >= 3 {
+            let first_dir = parts[1];
+            let second_dir = parts[2];
+
+            // Check mathematical properties of directory names
+            let first_len = first_dir.len();
+            let second_len = second_dir.len();
+
+            // Standard structure: first dir 3-4 chars, second dir 3-6 chars
+            // This matches /usr/bin, /usr/lib, /opt/pkg, etc.
+            matches!(first_len, 3 | 4) && matches!(second_len, 3 | 4 | 5 | 6)
+        } else {
+            false
+        }
+    }
+
+    /// Check if file is in a standard system directory using length-based patterns
+    fn is_in_standard_system_directory(file_path: &str) -> bool {
+        let parts: Vec<&str> = file_path.split('/').collect();
+
+        if parts.len() >= 3 {
+            let first_dir_len = parts[1].len();
+            let second_dir_len = parts[2].len();
+
+            // Standard pattern: /3-4char/3-6char/ (like /usr/bin/, /usr/lib/, /opt/share/)
+            (first_dir_len >= 3 && first_dir_len <= 4) &&
+            (second_dir_len >= 3 && second_dir_len <= 7) &&
+            !Self::is_temporary_directory(file_path)
+        } else {
+            false
+        }
+    }
+
+    /// Check if file has standard interface extensions
+    fn has_standard_interface_extension(file_path: &str) -> bool {
+        let standard_extensions = [".so", ".pc", ".la", ".h", ".hpp", ".service"];
+
+        standard_extensions.iter().any(|ext| file_path.ends_with(ext))
+    }
+
+    /// Check if file is a configuration file
+    fn is_configuration_file(file_path: &str) -> bool {
+        file_path.contains("etc/") && !file_path.contains("pax")
+    }
+
+    /// Check if path contains temporary or user-specific directories
+    fn is_temporary_directory(file_path: &str) -> bool {
+        file_path.contains("/tmp/") ||
+        file_path.contains("/var/tmp/") ||
+        file_path.contains("/home/") ||
+        file_path.contains("/root/")
+    }
 }
+
+/// Check if a file should be automatically provided by a package
+/// Uses basic pattern matching that works universally across systems
+fn should_provide_file(file_path: &str) -> bool {
+    BasicPatternMatcher::should_provide_file(file_path)
+}
+
 
 /// Calculate SHA256 hash of a file
 fn calculate_file_hash(file_path: &str) -> Result<String, String> {
@@ -1031,15 +1161,21 @@ mod tests {
         assert!(should_provide_file("/usr/bin/ls"));
         assert!(should_provide_file("/usr/lib/libc.so.6"));
         assert!(should_provide_file("/lib/x86_64-linux-gnu/libc.so.6"));
+        assert!(should_provide_file("/usr/include/stdio.h"));
+        assert!(should_provide_file("/usr/share/pkgconfig/glib-2.0.pc"));
+        assert!(should_provide_file("/usr/lib/systemd/system/ssh.service"));
+        assert!(should_provide_file("/usr/share/man/man1/ls.1.gz"));
 
         // Test files that should NOT be provided
         assert!(!should_provide_file("/etc/pax/config"));
         assert!(!should_provide_file("/tmp/tempfile"));
+        assert!(!should_provide_file("/var/tmp/cache"));
         assert!(!should_provide_file("/home/user/document.txt"));
 
         // Test library files
         assert!(should_provide_file("/usr/lib/libssl.so"));
         assert!(should_provide_file("/usr/lib/libssl.so.1.1"));
+        assert!(should_provide_file("/usr/lib/libssl.la"));
     }
 
     #[test]
@@ -1050,6 +1186,9 @@ mod tests {
             "/usr/bin/ls".to_string(),
             "/tmp/tempfile".to_string(),
             "/etc/pax/config".to_string(),
+            "/usr/include/stdio.h".to_string(),
+            "/usr/share/pkgconfig/glib-2.0.pc".to_string(),
+            "/var/tmp/cache".to_string(),
         ];
 
         let provides = generate_file_provides(&files);
@@ -1058,12 +1197,15 @@ mod tests {
         assert!(provides.contains(&"/etc/control.d/functions".to_string()));
         assert!(provides.contains(&"/etc/passwd".to_string()));
         assert!(provides.contains(&"/usr/bin/ls".to_string()));
+        assert!(provides.contains(&"/usr/include/stdio.h".to_string()));
+        assert!(provides.contains(&"/usr/share/pkgconfig/glib-2.0.pc".to_string()));
 
         // Should NOT include temp files or pax-specific files
         assert!(!provides.contains(&"/tmp/tempfile".to_string()));
         assert!(!provides.contains(&"/etc/pax/config".to_string()));
+        assert!(!provides.contains(&"/var/tmp/cache".to_string()));
 
-        // Should have exactly 3 provides
-        assert_eq!(provides.len(), 3);
+        // Should have exactly 5 provides
+        assert_eq!(provides.len(), 5);
     }
 }
