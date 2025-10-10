@@ -514,6 +514,15 @@ fn install_package(
     }
     files_progress.finish_and_clear();
 
+    // Generate and add file provides for important system files
+    let file_provides_progress = crate::progress::create_simple_progress("Adding file provides");
+    let file_provides = generate_file_provides(&files);
+    for provide in file_provides {
+        db.add_provides(pkg_id, &provide, None, "file")
+            .map_err(|e| format!("Failed to add file provide: {}", e))?;
+    }
+    file_provides_progress.finish_and_clear();
+
     // Add dependencies
     for dep in &entry.dependencies {
         db.add_dependency(pkg_id, dep, None, "runtime")
@@ -940,15 +949,121 @@ fn run_scriptlets(pkg_path: &std::path::Path, pkg_type: PackageType, stage: &str
     Ok(())
 }
 
+/// Generate file provides for important system files
+fn generate_file_provides(files: &[String]) -> Vec<String> {
+    let mut provides = Vec::new();
+
+    for file in files {
+        // Only generate provides for important system files that other packages might depend on
+        if should_provide_file(file) {
+            provides.push(file.clone());
+        }
+    }
+
+    provides
+}
+
+/// Check if a file should be automatically provided by a package
+fn should_provide_file(file_path: &str) -> bool {
+    // Files that start with /etc, /usr/bin, /usr/sbin, /usr/lib, /lib, /bin, /sbin
+    // and are not in subdirectories that shouldn't be provided (like /etc/pax)
+    if file_path.starts_with("/etc/") {
+        // Exclude pax-specific directories
+        if file_path.starts_with("/etc/pax/") {
+            return false;
+        }
+        return true;
+    }
+
+    if file_path.starts_with("/usr/bin/") ||
+       file_path.starts_with("/usr/sbin/") ||
+       file_path.starts_with("/usr/lib/") ||
+       file_path.starts_with("/bin/") ||
+       file_path.starts_with("/sbin/") ||
+       file_path.starts_with("/lib/") ||
+       file_path.starts_with("/lib64/") ||
+       file_path.starts_with("/usr/lib64/") {
+        return true;
+    }
+
+    // Also provide common library files
+    if file_path.ends_with(".so") || file_path.ends_with(".so.1") || file_path.ends_with(".so.2") {
+        return true;
+    }
+
+    // Special case for the control.d functions file mentioned in the bug report
+    if file_path == "/etc/control.d/functions" {
+        return true;
+    }
+
+    false
+}
+
 /// Calculate SHA256 hash of a file
 fn calculate_file_hash(file_path: &str) -> Result<String, String> {
     let mut file = fs::File::open(file_path)
         .map_err(|e| format!("Failed to open file: {}", e))?;
-    
+
     let mut hasher = Sha256::new();
     std::io::copy(&mut file, &mut hasher)
         .map_err(|e| format!("Failed to read file: {}", e))?;
-    
+
     let hash = hasher.finalize();
     Ok(format!("{:x}", hash))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_calculate_file_hash() {
+        let hash = calculate_file_hash("Cargo.toml").unwrap();
+        assert!(!hash.is_empty());
+        assert_eq!(hash.len(), 64); // SHA256 produces 64 character hex string
+    }
+
+    #[test]
+    fn test_should_provide_file() {
+        // Test files that should be provided
+        assert!(should_provide_file("/etc/control.d/functions"));
+        assert!(should_provide_file("/etc/passwd"));
+        assert!(should_provide_file("/usr/bin/ls"));
+        assert!(should_provide_file("/usr/lib/libc.so.6"));
+        assert!(should_provide_file("/lib/x86_64-linux-gnu/libc.so.6"));
+
+        // Test files that should NOT be provided
+        assert!(!should_provide_file("/etc/pax/config"));
+        assert!(!should_provide_file("/tmp/tempfile"));
+        assert!(!should_provide_file("/home/user/document.txt"));
+
+        // Test library files
+        assert!(should_provide_file("/usr/lib/libssl.so"));
+        assert!(should_provide_file("/usr/lib/libssl.so.1.1"));
+    }
+
+    #[test]
+    fn test_generate_file_provides() {
+        let files = vec![
+            "/etc/control.d/functions".to_string(),
+            "/etc/passwd".to_string(),
+            "/usr/bin/ls".to_string(),
+            "/tmp/tempfile".to_string(),
+            "/etc/pax/config".to_string(),
+        ];
+
+        let provides = generate_file_provides(&files);
+
+        // Should include the important system files
+        assert!(provides.contains(&"/etc/control.d/functions".to_string()));
+        assert!(provides.contains(&"/etc/passwd".to_string()));
+        assert!(provides.contains(&"/usr/bin/ls".to_string()));
+
+        // Should NOT include temp files or pax-specific files
+        assert!(!provides.contains(&"/tmp/tempfile".to_string()));
+        assert!(!provides.contains(&"/etc/pax/config".to_string()));
+
+        // Should have exactly 3 provides
+        assert_eq!(provides.len(), 3);
+    }
 }

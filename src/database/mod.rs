@@ -349,9 +349,9 @@ impl Database {
     pub fn get_reverse_dependencies(&self, package_name: &str) -> SqlResult<Vec<String>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT DISTINCT pkg.name 
-             FROM dependencies d 
-             JOIN packages pkg ON d.package_id = pkg.id 
+            "SELECT DISTINCT pkg.name
+             FROM dependencies d
+             JOIN packages pkg ON d.package_id = pkg.id
              WHERE d.depends_on = ?1"
         )?;
         let rows = stmt.query_map(params![package_name], |row| row.get(0))?;
@@ -361,6 +361,17 @@ impl Database {
             deps.push(row?);
         }
         Ok(deps)
+    }
+
+    // Check if a file is provided by any installed package
+    pub fn is_file_provided(&self, file_path: &str) -> SqlResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT COUNT(*) FROM files f JOIN packages p ON f.package_id = p.id WHERE f.path = ?1 AND p.name IS NOT NULL"
+        )?;
+
+        let count: i64 = stmt.query_row(params![file_path], |row| row.get(0))?;
+        Ok(count > 0)
     }
 }
 

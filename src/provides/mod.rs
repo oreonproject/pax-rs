@@ -43,6 +43,11 @@ impl ProvidesManager {
             return Ok(true);
         }
 
+        // Check if it's a file path that might be provided by an installed package
+        if dep_name.starts_with('/') && self.check_file_provided_by_installed_package(dep_name) {
+            return Ok(true);
+        }
+
         // Check for special runtime linker symbols
         if dep_name.starts_with("rtld(") || dep_name.starts_with("ld-linux") {
             // Runtime linker symbols are always provided by the system
@@ -151,10 +156,15 @@ impl ProvidesManager {
         }
     }
 
+    // Check if a file is provided by any installed package
+    fn check_file_provided_by_installed_package(&self, file_path: &str) -> bool {
+        self.db.is_file_provided(file_path).unwrap_or(false)
+    }
+
     // Find which package provides something
     pub fn find_provider(&self, name: &str) -> Result<Option<String>, String> {
         let provides = self.query(name)?;
-        
+
         if let Some(first) = provides.first() {
             Ok(Some(first.package_name.clone()))
         } else {
