@@ -9,8 +9,8 @@ pub use {
 };
 
 pub mod emancipate;
-pub mod endpoints_init;
 pub mod install;
+pub mod pax_init;
 pub mod remove;
 pub mod update;
 pub mod upgrade;
@@ -31,12 +31,13 @@ pub fn main() {
         "PAX is the official package manager for Oreon 11.",
         vec![],
         Some(vec![
-            endpoints_init::build,
-            install::build,
-            remove::build_remove,
-            remove::build_purge,
-            update::build,
             emancipate::build,
+            install::build,
+            pax_init::build,
+            remove::build_purge,
+            remove::build_remove,
+            update::build,
+            upgrade::build,
         ]),
         |_command, _args| PostAction::GetHelp,
         &[],

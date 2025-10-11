@@ -1,4 +1,4 @@
-use std::{env, io::Write, iter::once, process::Command as RunCommand, slice::Iter};
+use std::{env, io::Write, process::Command as RunCommand, slice::Iter};
 
 use flags::Flag;
 use settings::remove_lock;
@@ -122,27 +122,28 @@ impl Command {
         help
     }
     // Run the command
-    pub fn run(self, mut args: Iter<'_, String>) {
+    pub fn run(self, mut raw_args: Iter<'_, String>) {
         let mut m_self = self;
         let mut first_arg = true;
         // store breakpoint
         let mut opr: Option<(usize, Option<String>)> = None;
-
+        let mut args = Vec::new();
         // outer loop over args
-        'outer: while let Some(arg) = args.next() {
+        'outer: while let Some(arg) = raw_args.next() {
             if let Some(l_arg) = arg.strip_prefix("--") {
-                match m_self.handle_long_flag(l_arg, &mut args, &mut opr) {
+                match m_self.handle_long_flag(l_arg, &mut raw_args, &mut opr) {
                     HandlerResult::ContinueOuter => continue 'outer,
                     HandlerResult::ReturnEarly => return,
                 }
             } else if let Some(s_arg) = arg.strip_prefix("-") {
-                match m_self.handle_short_flags(s_arg, &mut args, &mut opr) {
+                match m_self.handle_short_flags(s_arg, &mut raw_args, &mut opr) {
                     HandlerResult::ContinueOuter => continue 'outer,
                     HandlerResult::ReturnEarly => return,
                 }
-            } else if first_arg {
-                m_self.try_handle_subcommand(arg, &mut args);
+            } else if first_arg && m_self.try_handle_subcommand(arg, &mut raw_args).is_ok() {
                 return;
+            } else {
+                args.push(arg.to_string());
             }
             first_arg = false;
         }
@@ -150,11 +151,8 @@ impl Command {
             let flag = &m_self.flags[flag_idx];
             (flag.run_func)(&mut m_self.states, val)
         } else {
-            m_self.handle_post_action((m_self.run_func)(&m_self.states, None));
+            m_self.handle_post_action((m_self.run_func)(&m_self.states, Some(&args)));
         }
-        // if let Err(message) = remove_lock() {
-        //     println!("\x1B[91m{message}\x1B[0m");
-        // }
     }
 
     fn handle_long_flag(
@@ -237,19 +235,19 @@ impl Command {
         HandlerResult::ContinueOuter
     }
 
-    fn try_handle_subcommand(self, arg: &str, args: &mut Iter<'_, String>) {
+    fn try_handle_subcommand(&self, arg: &str, args: &mut Iter<'_, String>) -> Result<(), ()> {
         let parents = &self.compile_parents();
-        if let Some(subcommands) = self.subcommands {
+        if let Some(subcommands) = &self.subcommands {
             for command in subcommands {
                 let command = (command)(parents);
-                if command.name == arg {
+                if command.name == *arg {
                     command.run(args.clone());
-                    return;
+                    return Ok(());
                 } else {
                     for alias in &command.aliases {
                         if alias == arg {
                             command.run(args.clone());
-                            return;
+                            return Ok(());
                         }
                     }
                 }
@@ -259,12 +257,14 @@ impl Command {
                 "Error: {error}\nRun {} --help for usage.\n{error}",
                 self.name
             );
+            Ok(())
         } else {
             // Takes the first argument (which was popped from the front of args at the 'outer loop of `run()`) and adds it to the remaining arguments, before calling the main function.
-            let args = once(arg.to_string())
-                .chain(args.cloned())
-                .collect::<Vec<String>>();
-            self.handle_post_action((self.run_func)(&self.states, Some(&args)));
+            // let args = once(arg.to_string())
+            //     .chain(args.cloned())
+            //     .collect::<Vec<String>>();
+            // self.handle_post_action((self.run_func)(&self.states, Some(&args)));
+            Err(())
         }
     }
 
