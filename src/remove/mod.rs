@@ -1,9 +1,7 @@
 use metadata::get_local_deps;
-use settings::acquire_lock;
 use tokio::runtime::Runtime;
-use utils::choice;
 
-use crate::{Command, PostAction, StateBox};
+use crate::{Command, PostAction, StateBox, acquire_lock, choice};
 
 pub fn build_remove(hierarchy: &[String]) -> Command {
     Command::new(
@@ -93,10 +91,8 @@ fn run(states: &StateBox, args: Option<&[String]>, purge: bool) -> PostAction {
                 }
             }
             for package in metadatas.primary {
-                if let Err(message) = package.remove_version(purge) {
-                    return PostAction::Fuck(format!(
-                        "Operation failed!\nReported Error: \"\x1B[91m{message}\n\x1B[91m=== YOU MAY HAVE BROKEN PACKAGES! ==="
-                    ));
+                if let Err(fault) = package.remove_version(purge) {
+                    return PostAction::Fuck(fault);
                 };
             }
             PostAction::Return

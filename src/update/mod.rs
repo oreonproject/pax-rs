@@ -1,4 +1,4 @@
-use metadata::collect_upgrades;
+use metadata::collect_updates;
 use settings::acquire_lock;
 use tokio::runtime::Runtime;
 
@@ -25,7 +25,7 @@ fn run(_states: &StateBox, _args: Option<&[String]>) -> PostAction {
     let Ok(runtime) = Runtime::new() else {
         return PostAction::Fuck(String::from("Error creating runtime!"));
     };
-    if let Err(fault) = runtime.block_on(collect_upgrades()) {
+    if let Err(fault) = runtime.block_on(collect_updates()) {
         PostAction::Fuck(fault)
     } else {
         PostAction::Return

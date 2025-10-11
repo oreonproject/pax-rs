@@ -12,96 +12,6 @@ use std::{
 use tokio::runtime::Runtime;
 use utils::{err, get_metadata_dir, get_update_dir, tmpfile};
 
-pub fn build_deps(
-    args: &[String],
-    sources: &[String],
-    runtime: &Runtime,
-    priordeps: &mut HashSet<ProcessedMetaData>,
-    dependent: bool,
-) -> Result<Vec<ProcessedMetaData>, String> {
-    let mut metadatas = match runtime.block_on(get_metadatas(args, sources, dependent)) {
-        Ok(data) => data,
-        Err(faulty) => {
-            return err!("Failed to locate package {faulty}.");
-        }
-    };
-    let deps_vec = match runtime.block_on(get_deps(&metadatas, sources)) {
-        Ok(data) => data,
-        Err(faulty) => {
-            return err!("Failed to parse dependency {faulty}!");
-        }
-    };
-    let mut deps = HashSet::new();
-    deps.extend(deps_vec);
-    let diff = deps
-        .difference(priordeps)
-        .collect::<Vec<&ProcessedMetaData>>()
-        .iter()
-        .map(|x| x.name.clone())
-        .collect::<Vec<String>>();
-    priordeps.extend(deps);
-    if !diff.is_empty() {
-        let data = build_deps(&diff, sources, runtime, priordeps, true)?;
-        for processed in data {
-            if !metadatas
-                .iter()
-                .any(|x| x.name == processed.name && x.version == processed.version)
-            {
-                metadatas.push(processed);
-            }
-        }
-    }
-    Ok(metadatas)
-}
-
-async fn get_metadatas(
-    apps: &[String],
-    sources: &[String],
-    dependent: bool,
-) -> Result<Vec<ProcessedMetaData>, String> {
-    print!("\x1B[2K\rReading package lists... 0%");
-    let mut metadatas = Vec::new();
-    let mut children = Vec::new();
-    for app in apps {
-        children.push(get_metadata(app, None, sources, dependent));
-    }
-    let count = children.len();
-    for (i, child) in children.into_iter().enumerate() {
-        print!("\rReading package lists... {}% ", i * 100 / count);
-        let _ = std::io::stdout().flush();
-        if let Some(child) = child.await {
-            metadatas.push(child);
-        } else {
-            return Err(apps[i].to_string());
-        }
-    }
-    print!("\rReading package lists... Done!");
-    Ok(metadatas)
-}
-
-async fn get_deps(
-    metadatas: &[ProcessedMetaData],
-    sources: &[String],
-) -> Result<Vec<ProcessedMetaData>, String> {
-    print!("\x1B[2K\rCollecting dependencies... 0%");
-    let mut deps = Vec::new();
-    let mut children = Vec::new();
-    for metadata in metadatas {
-        children.push(metadata.get_dep(sources));
-    }
-    let count = children.len();
-    for (i, child) in children.into_iter().enumerate() {
-        print!("\rCollecting dependencies... {}% ", i * 100 / count);
-        let _ = std::io::stdout().flush();
-        match child.await {
-            Ok(dep) => deps.extend(dep),
-            Err(faulty) => return Err(faulty),
-        }
-    }
-    print!("\rCollecting dependencies... Done!");
-    Ok(deps)
-}
-
 #[derive(PartialEq, Eq, Serialize, Deserialize, Debug, Hash, Clone)]
 pub struct ProcessedMetaData {
     pub name: String,
@@ -135,9 +45,9 @@ pub struct ProcessedCompilable {
 }
 
 impl ProcessedMetaData {
-    pub async fn to_installed(&self, sources: &[String], kind: MetaDataKind) -> InstalledVersion {
+    pub async fn to_installed(&self, sources: &[String]) -> InstalledVersion {
         InstalledVersion {
-            kind,
+            kind: self.kind.clone(),
             version: self.version.to_string(),
             origin: self.origin.clone(),
             dependent: self.dependent,
@@ -164,7 +74,6 @@ impl ProcessedMetaData {
                 dependencies
             },
             dependents: Vec::new(),
-            // uninstall: self.uninstall.to_string(),
             install_kind: match &self.install_kind {
                 ProcessedInstallKind::PreBuilt(prebuilt) => {
                     InstalledInstallKind::PreBuilt(prebuilt.clone())
@@ -187,7 +96,7 @@ impl ProcessedMetaData {
         let name = self.name.to_string();
         println!("Installing {name}...");
         let (path, loaded_data) = get_metadata_path(&name)?;
-        let metadata = runtime.block_on(self.to_installed(sources, self.kind.clone()));
+        let metadata = runtime.block_on(self.to_installed(sources));
         let mut loaded_data = if let Some(data) = loaded_data {
             data
         } else {
@@ -205,6 +114,7 @@ impl ProcessedMetaData {
         }) {
             return Ok(None);
         }
+        // Run install thingy
         loaded_data.installed.push(metadata);
         loaded_data.write(&path)?;
         for dep in deps {
@@ -215,29 +125,6 @@ impl ProcessedMetaData {
             None => return err!("Failed to reserve a file for {name}!"),
         };
         Ok(Some(tmpfile))
-    }
-    pub async fn get_dep(&self, sources: &[String]) -> Result<Vec<Self>, String> {
-        let mut deps = Vec::new();
-        // These are important to the build process, so they need to be installed prior to
-        // installing the dependant, so they get pushed lower down the dependency Vec
-        // (lower means it will get installed earlier).
-        for dep in &self.dependencies {
-            if let PseudoProcessed::MetaData(metadata) = dep.to_processed(sources).await? {
-                if let Some(i) = deps.iter().position(|x| *x == *metadata) {
-                    deps.remove(i);
-                }
-                deps.push(*metadata);
-            }
-        }
-        // The dependant can still be built without this dependency, so order doesn't matter.
-        for dep in &self.runtime_dependencies {
-            if let PseudoProcessed::MetaData(metadata) = dep.to_processed(sources).await?
-                && !deps.contains(&metadata)
-            {
-                deps.push(*metadata);
-            }
-        }
-        Ok(deps)
     }
     pub fn write(self, base: &Path, inc: &mut usize) -> Result<Self, String> {
         let path = loop {
@@ -278,6 +165,193 @@ impl ProcessedMetaData {
             Err(_) => return err!("Failed to parse package `{name}`'s data!"),
         })
     }
+    pub async fn get_metadata(
+        app: &str,
+        version: Option<&str>,
+        sources: &[String],
+        dependent: bool,
+    ) -> Option<Self> {
+        let mut metadata = None;
+        for source in sources {
+            metadata = {
+                let endpoint = if let Some(version) = version {
+                    format!("{source}/packages/metadata/{app}?v={version}")
+                } else {
+                    format!("{source}/packages/metadata/{app}")
+                };
+                let body = reqwest::get(endpoint).await.ok()?.text().await.ok()?;
+                if let Ok(raw_pax) = serde_json::from_str::<RawPax>(&body)
+                    && let Some(processed) = raw_pax.process(dependent)
+                {
+                    Some(processed)
+                } else {
+                    None
+                }
+            };
+        }
+        metadata
+    }
+    pub fn remove_update_cache(&self) -> Result<(), String> {
+        let path = get_update_dir()?;
+        let Ok(dir) = fs::read_dir(&path) else {
+            return err!("Failed to read {} as a directory!", path.display());
+        };
+        for file in dir.flatten() {
+            if let Some(name) = file.path().file_prefix() {
+                let name = name.to_string_lossy();
+                let data = Self::open(&name)?;
+                if data.name == self.name {
+                    match fs::remove_file(file.path()) {
+                        Ok(()) => return Ok(()),
+                        Err(_) => return err!("Couldn't remove update cache for {}!", data.name),
+                    }
+                }
+            }
+        }
+        println!(
+            "\x1B[33m[WARN] cache for {} already cleared!\x1B[0m",
+            self.name
+        );
+        Ok(())
+    }
+    pub async fn get_depends(
+        metadata: &Self,
+        sources: &[String],
+        prior: &mut HashSet<Specific>,
+    ) -> Result<InstallPackage, String> {
+        let mut package = InstallPackage {
+            metadata: metadata.clone(),
+            dependencies: Vec::new(),
+        };
+        for dep in &metadata.dependencies {
+            let dep = match dep {
+                DependKind::Latest(latest) => {
+                    if let Some(data) = Self::get_metadata(latest, None, sources, true).await {
+                        Some(data)
+                    } else {
+                        return err!("Failed to locate latest version of dependency `{latest}`");
+                    }
+                }
+                DependKind::Specific(specific) => {
+                    if let Some(data) =
+                        Self::get_metadata(&specific.name, Some(&specific.version), sources, true)
+                            .await
+                    {
+                        Some(data)
+                    } else {
+                        return err!(
+                            "Failed to locate dependency `{}` version {}!",
+                            specific.name,
+                            specific.version
+                        );
+                    }
+                }
+                DependKind::Volatile(volatile) => {
+                    let mut command = RunCommand::new("which");
+                    command.arg(volatile);
+                    command.stdout(std::process::Stdio::null());
+                    command.stderr(std::process::Stdio::null());
+                    if let Ok(Some(status)) = command.status().map(|x| x.code())
+                        && status == 0
+                    {
+                        None
+                    } else if let Some(data) =
+                        Self::get_metadata(volatile, None, sources, true).await
+                    {
+                        Some(data)
+                    } else {
+                        return err!(
+                            "Failed to locate latest version of volatile dependency `{volatile}`"
+                        );
+                    }
+                }
+            };
+            if let Some(dep) = dep {
+                let specific = Specific {
+                    name: dep.name.to_string(),
+                    version: dep.version.to_string(),
+                };
+                if !prior.contains(&specific) {
+                    prior.insert(specific);
+                    let child = Box::pin(Self::get_depends(&dep, sources, prior)).await?;
+                    package.dependencies.push(child);
+                }
+            }
+        }
+        Ok(package)
+    }
+    pub fn upgrade_package(
+        package: &Self,
+        current_ver: Option<&str>,
+        target_ver: &str,
+        sources: &[String],
+        runtime: &Runtime,
+    ) -> Result<(), String> {
+        let mut installed = InstalledMetaData::open(&package.name)?;
+        let mut to_upgrade = Vec::new();
+        if let Some(ver) = current_ver {
+            if let Some(version) = installed.installed.iter_mut().find(|x| x.version == ver) {
+                to_upgrade.push(version);
+            } else {
+                return err!("`{}` didn't contain version {}!", package.name, ver);
+            }
+        } else {
+            for version in installed.installed.iter_mut().filter(|x| !x.dependent) {
+                to_upgrade.push(version);
+            }
+        }
+        for old_pkg in to_upgrade {
+            let new_data = old_pkg
+                .origin
+                .get_ver(target_ver, old_pkg.dependent, runtime)?;
+            let new_version = Specific {
+                name: new_data.name.to_string(),
+                version: new_data.version.to_string(),
+            };
+            let old_version = Specific {
+                name: new_data.name.to_string(),
+                version: old_pkg.version.to_string(),
+            };
+            old_pkg.clear_dependencies(&old_version)?;
+            let new_pkg = runtime.block_on(new_data.to_installed(sources));
+            for old_dep in old_pkg
+                .dependencies
+                .iter()
+                .filter(|x| !new_pkg.dependencies.contains(x))
+            {
+                old_dep.remove_version(true)?;
+            }
+            for new_dep in new_pkg
+                .dependencies
+                .iter()
+                .filter(|x| !old_pkg.dependencies.contains(x))
+            {
+                let mut seen = HashSet::new();
+                if let Some(data) = runtime.block_on(get_package(
+                    sources,
+                    &(&new_dep.name, Some(&new_dep.version)),
+                    true,
+                    &mut seen,
+                ))? {
+                    data.install(sources, runtime)?;
+                }
+            }
+            for new_dep in new_pkg.dependents {
+                new_dep.write_dependent(&new_version.name, &new_version.version)?;
+            }
+            old_version.remove_version(false)?;
+            match new_data.install_package(sources, runtime) {
+                Ok(_file) => {} // < == ;P
+                Err(fault) => {
+                    return err!(
+                        "\x1B[0mError updating package {}!\nReported error: \"\x1B[91m{fault}\x1B[0m\"",
+                        package.name
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(PartialEq, Eq, Serialize, Deserialize, Debug, Hash, Clone)]
@@ -295,7 +369,7 @@ impl std::fmt::Display for MetaDataKind {
 
 #[derive(PartialEq, Eq, Deserialize, Serialize, Debug, Hash, Clone)]
 pub enum OriginKind {
-    Url(String),
+    Pax(String),
     Github {
         user: String,
         repo: String,
@@ -303,31 +377,41 @@ pub enum OriginKind {
     },
 }
 
-async fn get_metadata(
-    app: &str,
-    version: Option<&str>,
-    sources: &[String],
-    dependent: bool,
-) -> Option<ProcessedMetaData> {
-    let mut metadata = None;
-    for source in sources {
-        metadata = {
-            let endpoint = if let Some(version) = version {
-                format!("{source}/packages/metadata/{app}?v={version}")
-            } else {
-                format!("{source}/packages/metadata/{app}")
-            };
-            let body = reqwest::get(endpoint).await.ok()?.text().await.ok()?;
-            if let Ok(raw_pax) = serde_json::from_str::<RawPax>(&body)
-                && let Some(processed) = raw_pax.process(dependent)
-            {
-                Some(processed)
-            } else {
-                None
+impl OriginKind {
+    pub fn get_ver(
+        &self,
+        target: &str,
+        dependent: bool,
+        runtime: &Runtime,
+    ) -> Result<ProcessedMetaData, String> {
+        match self {
+            Self::Pax(url) => {
+                let url = url.replace("/package/", "/packages/metadata/");
+                let endpoint = format!("{url}?v={target}");
+                async fn get_data(endpoint: &str) -> Option<String> {
+                    reqwest::get(endpoint).await.ok()?.text().await.ok()
+                }
+                if let Some(body) = runtime.block_on(get_data(&endpoint)) {
+                    if let Ok(raw_pax) = serde_json::from_str::<RawPax>(&body) {
+                        if let Some(processed) = raw_pax.process(dependent) {
+                            Ok(processed)
+                        } else {
+                            err!("Failed to process package data at {url}!")
+                        }
+                    } else {
+                        err!("Failed to parse package data at {url}!")
+                    }
+                } else {
+                    err!("Failed to locate origin {url}!")
+                }
             }
-        };
+            Self::Github {
+                user: _,
+                repo: _,
+                commit: _,
+            } => err!("Not implemented!"),
+        }
     }
-    metadata
 }
 
 #[derive(PartialEq, Eq, Debug)]
@@ -346,8 +430,10 @@ pub enum DependKind {
 impl DependKind {
     async fn to_processed(&self, sources: &[String]) -> Result<PseudoProcessed, String> {
         match self {
-            DependKind::Latest(latest) => {
-                if let Some(data) = get_metadata(latest, None, sources, true).await {
+            Self::Latest(latest) => {
+                if let Some(data) =
+                    ProcessedMetaData::get_metadata(latest, None, sources, true).await
+                {
                     if let Ok(mut subdata) = InstalledMetaData::open(&data.name) {
                         subdata.installed.sort_by_key(|x| {
                             Version::parse(&x.version).unwrap_or(Version::new(0, 0, 0))
@@ -367,18 +453,22 @@ impl DependKind {
                     Err(latest.to_string())
                 }
             }
-            DependKind::Specific(Specific { name, version }) => {
-                if let Some(data) = get_metadata(name, Some(version), sources, true).await {
+            Self::Specific(Specific { name, version }) => {
+                if let Some(data) =
+                    ProcessedMetaData::get_metadata(name, Some(version), sources, true).await
+                {
                     Ok(PseudoProcessed::MetaData(Box::new(data)))
                 } else {
                     Err(name.to_string())
                 }
             }
-            DependKind::Volatile(volatile) => {
+            Self::Volatile(volatile) => {
                 if let Ok(Some(status)) = RunCommand::new("which").status().map(|x| x.code()) {
                     if status != 0 {
                         Ok(PseudoProcessed::Volatile)
-                    } else if let Some(data) = get_metadata(volatile, None, sources, true).await {
+                    } else if let Some(data) =
+                        ProcessedMetaData::get_metadata(volatile, None, sources, true).await
+                    {
                         Ok(PseudoProcessed::MetaData(Box::new(data)))
                     } else {
                         Err(volatile.to_string())
@@ -409,14 +499,12 @@ impl Specific {
                 .iter_mut()
                 .find(|x| x.version == *self.version)
             {
-                let their_dep = Specific {
+                let their_dep = Self {
                     name: their_name.to_string(),
                     version: their_ver.to_string(),
                 };
                 if !bit.dependents.contains(&their_dep) {
                     bit.dependents.push(their_dep);
-                } else {
-                    return err!("`{}` didn't contain version {}!", self.name, self.version);
                 }
             }
             let mut file = match File::create(&path) {
@@ -471,7 +559,10 @@ impl Specific {
             // Since packages are interlinked, chances are another package
             // has already removed this one, and therefore we are just holding
             // a stale package `Specific`!
-            println!("\x1B[33m[WARN] Skipping `{}`\x1B[0m...", self.name);
+            println!(
+                "\x1B[33m[WARN] Skipping `{}`\x1B[0m (is it installed?)...",
+                self.name
+            );
             return Ok(());
         };
         let mut data = if let Some(data) = data.lock(&path, &self.name)? {
@@ -479,7 +570,7 @@ impl Specific {
         } else {
             return Ok(());
         };
-        let (index, child) = match data
+        let (index, _child) = match data
             .installed
             .iter_mut()
             .enumerate()
@@ -489,75 +580,18 @@ impl Specific {
             None => {
                 // Same as above.
                 println!(
-                    "\x1B[33m[WARN] Skipping `{}` version {}\x1B[0m...",
+                    "\x1B[33m[WARN] Skipping `{}` version {}\x1B[0m (is it installed?)...",
                     self.name, self.version
                 );
                 return Ok(());
             }
         };
-        for dependency in &child.dependencies {
-            dependency.forget_dependent(self)?;
-        }
-        for dependent in &child.dependents {
-            dependent.remove_version(purge)?;
-        }
         if purge {
             // Run purge thingy
         } else {
             // Run uninstall thingy
         }
         data.installed.remove(index);
-        data.locked = false;
-        data.write(&path)?;
-        Ok(())
-    }
-    fn forget_dependent(&self, other: &Self) -> Result<(), String> {
-        let (path, data) = get_metadata_path(&self.name)?;
-        let data = if let Some(data) = data {
-            data
-        } else {
-            // Something
-            println!("\x1B[33m[WARN] Skipping `{}`\x1B[0m...", self.name);
-            return Ok(());
-        };
-        let mut data = if let Some(data) = data.lock(&path, &self.name)? {
-            data
-        } else {
-            return Ok(());
-        };
-        let (data_index, child) = match data
-            .installed
-            .iter_mut()
-            .enumerate()
-            .find(|x| x.1.version == self.version)
-        {
-            Some(data) => data,
-            None => {
-                return err!(
-                    "Failed to remove `{}`'s dependent {}!",
-                    self.name,
-                    other.name
-                );
-            }
-        };
-        let child_index = match child
-            .dependents
-            .iter()
-            .position(|x| x.name == other.name && x.version == other.version)
-        {
-            Some(index) => index,
-            None => {
-                return err!(
-                    "Could'nt locate dependent `{}`s in {}!",
-                    other.name,
-                    self.name
-                );
-            }
-        };
-        child.dependents.remove(child_index);
-        if child.dependents.is_empty() {
-            data.installed.remove(data_index);
-        }
         data.locked = false;
         data.write(&path)?;
         Ok(())
@@ -652,6 +686,40 @@ pub struct InstalledVersion {
     pub hash: String,
 }
 
+impl InstalledVersion {
+    // This feels a _little_ bit hacky, so I will probably remove it.
+    pub fn clear_dependencies(&self, specific: &Specific) -> Result<(), String> {
+        let path = get_metadata_dir()?;
+        for dependency in &self.dependencies {
+            let mut data = InstalledMetaData::open(&dependency.name)?;
+            let Some(ver) = data
+                .installed
+                .iter_mut()
+                .find(|x| x.version == dependency.version)
+            else {
+                return err!(
+                    "`{}` didn't contain version {}!",
+                    data.name,
+                    dependency.version
+                );
+            };
+            let Some(index) = ver.dependents.iter().position(|x| x == specific) else {
+                return err!(
+                    "`{}` {} didn't contain dependent {}!",
+                    data.name,
+                    ver.version,
+                    specific.name
+                );
+            };
+            ver.dependents.remove(index);
+            let mut path = path.clone();
+            path.push(format!("{}.yaml", dependency.name));
+            data.write(&path)?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(PartialEq, Deserialize, Serialize, Debug, Clone)]
 pub enum InstalledInstallKind {
     PreBuilt(PreBuilt),
@@ -702,7 +770,7 @@ impl RawPax {
         //     return None;
         // };
         } else {
-            OriginKind::Url(self.origin.clone())
+            OriginKind::Pax(self.origin.clone())
         };
         let dependencies = {
             let mut deps = Vec::new();
@@ -790,7 +858,7 @@ pub struct QueuedChanges {
 
 impl QueuedChanges {
     pub fn new() -> Self {
-        QueuedChanges {
+        Self {
             primary: HashSet::new(),
             secondary: HashSet::new(),
         }
@@ -829,15 +897,13 @@ impl Default for QueuedChanges {
 /* #region Remove/Purge */
 pub async fn get_local_deps(args: &[(&String, Option<&String>)]) -> Result<QueuedChanges, String> {
     print!("\x1B[2K\rCollecting dependencies... 0%");
-    let mut children = Vec::new();
-    for dep in args {
-        children.push(get_local_dep(dep, true));
-    }
+    let mut seen = HashSet::new();
+    let count = args.len();
     let mut result = QueuedChanges::new();
-    let count = children.len();
-    for (i, child) in children.into_iter().enumerate() {
+    for (i, dep) in args.iter().enumerate() {
         print!("\rCollecting dependencies... {}% ", i * 100 / count);
-        result.extend(child.await?);
+        let _ = std::io::stdout().flush();
+        result.extend(get_local_dep(dep, &mut seen, true).await?);
     }
     print!("\rCollecting dependencies... Done!");
     result.dependents()?;
@@ -846,6 +912,7 @@ pub async fn get_local_deps(args: &[(&String, Option<&String>)]) -> Result<Queue
 
 async fn get_local_dep(
     dep: &(&String, Option<&String>),
+    prior: &mut HashSet<Specific>,
     root: bool,
 ) -> Result<QueuedChanges, String> {
     let (dep, ver) = *dep;
@@ -866,8 +933,14 @@ async fn get_local_dep(
     let mut result = QueuedChanges::new();
     for version in working {
         for dependency in &version.dependencies {
+            if prior.contains(dependency) {
+                continue;
+            } else {
+                prior.insert(dependency.clone());
+            }
             let items = Box::pin(get_local_dep(
                 &(&dependency.name, Some(&dependency.version)),
+                prior,
                 false,
             ))
             .await?;
@@ -886,39 +959,51 @@ async fn get_local_dep(
 
 /* #endregion Remove/Purge */
 /* #region Update */
-pub async fn collect_upgrades() -> Result<(), String> {
+pub async fn collect_updates() -> Result<(), String> {
     let settings = SettingsYaml::get_settings()?;
     print!("\x1B[2K\rReading package lists... 0%");
     let path = get_metadata_dir()?;
-    let dir = match fs::read_dir(&path) {
-        Ok(dir) => dir,
-        Err(_) => {
-            return err!("Failed to read {} as a directory!", path.display());
-        }
+    let Ok(dir) = fs::read_dir(&path) else {
+        return err!("Failed to read {} as a directory!", path.display());
     };
     let mut children = Vec::new();
     for file in dir.flatten() {
-        children.push(collect_upgrade(file.path(), &settings.sources));
+        children.push(collect_update(file.path(), &settings.sources));
     }
-    let dir = get_update_dir()?;
+    let path = get_update_dir()?;
     let mut result = Vec::new();
     let count = children.len();
     for (i, child) in children.into_iter().enumerate() {
         print!("\rReading package lists... {}%", i * 100 / count);
+        let _ = std::io::stdout().flush();
         result.extend(child.await?);
     }
     print!("\rReading package lists... Done!\nSaving upgrade data... 0%");
+    let Ok(dir) = fs::read_dir(&path) else {
+        return err!("Failed to read {} as a directory!", path.display());
+    };
+    let mut old = Vec::new();
+    for file in dir.flatten() {
+        if let Some(name) = file.path().file_prefix() {
+            old.push(ProcessedMetaData::open(&name.to_string_lossy())?.name);
+        }
+    }
     let mut inc = 0;
     let count = result.len();
-    for (i, data) in result.into_iter().enumerate() {
+    for (i, data) in result
+        .into_iter()
+        .filter(|x| !old.contains(&x.name))
+        .enumerate()
+    {
         print!("\rSaving upgrade data... {}%", i * 100 / count);
-        data.write(&dir, &mut inc)?;
+        let _ = std::io::stdout().flush();
+        data.write(&path, &mut inc)?;
     }
     println!("\rSaving upgrade data... Done!");
     Ok(())
 }
 
-async fn collect_upgrade(
+async fn collect_update(
     path: PathBuf,
     sources: &[String],
 ) -> Result<Vec<ProcessedMetaData>, String> {
@@ -937,7 +1022,7 @@ async fn collect_upgrade(
         let name = name.to_string();
         if version.dependents.is_empty()
             && !version.dependent
-            && let Some(data) = get_metadata(&name, None, sources, true).await
+            && let Some(data) = ProcessedMetaData::get_metadata(&name, None, sources, true).await
             && Version::parse(&data.version).unwrap_or(Version::new(0, 0, 0))
                 > Version::parse(&version.version).unwrap_or(Version::new(0, 0, 0))
         {
@@ -994,7 +1079,7 @@ pub fn emancipate(data: &[(&String, Option<&String>)]) -> Result<(), String> {
 /* #endregion Emancipate */
 /* #region Upgrade */
 pub fn upgrade_all() -> Result<Vec<ProcessedMetaData>, String> {
-    let path = get_metadata_dir()?;
+    let path = get_update_dir()?;
     let dir = match fs::read_dir(&path) {
         Ok(dir) => dir,
         Err(_) => {
@@ -1004,7 +1089,7 @@ pub fn upgrade_all() -> Result<Vec<ProcessedMetaData>, String> {
     let mut result = Vec::new();
     for file in dir.flatten() {
         let path = file.path();
-        if path.extension().is_none_or(|x| x != "yaml")
+        if path.extension().is_some_and(|x| x == "yaml")
             && let Some(name) = path.file_prefix()
         {
             let name = name.to_string_lossy();
@@ -1040,4 +1125,99 @@ pub fn upgrade_only(pkgs: &[(&String, Option<&String>)]) -> Result<Vec<Processed
     }
     Ok(result.into_iter().collect())
 }
+
+pub fn upgrade_packages(packages: &[ProcessedMetaData]) -> Result<(), String> {
+    let settings = SettingsYaml::get_settings()?;
+    let Ok(runtime) = Runtime::new() else {
+        return err!("Error creating runtime!");
+    };
+    for package in packages {
+        println!("Upgrading {}...", package.name);
+        ProcessedMetaData::upgrade_package(
+            package,
+            None,
+            &package.version,
+            &settings.sources,
+            &runtime,
+        )?;
+        package.remove_update_cache()?;
+    }
+    println!("Done!");
+    Ok(())
+}
+
 /* #endregion Upgrade */
+/* #region Install */
+
+#[derive(Debug)]
+pub struct InstallPackage {
+    pub metadata: ProcessedMetaData,
+    pub dependencies: Vec<InstallPackage>,
+}
+
+impl InstallPackage {
+    pub fn list_deps(&self) -> HashSet<String> {
+        let mut data = HashSet::new();
+        data.insert(self.metadata.name.to_string());
+        for dep in &self.dependencies {
+            data.extend(dep.list_deps());
+        }
+        data
+    }
+    pub fn install(self, sources: &[String], runtime: &Runtime) -> Result<(), String> {
+        for dep in self.dependencies {
+            dep.install(sources, runtime)?;
+        }
+        self.metadata.install_package(sources, runtime)?;
+        Ok(())
+    }
+}
+
+pub async fn get_packages(
+    args: &[(&String, Option<&String>)],
+) -> Result<Vec<InstallPackage>, String> {
+    print!("\x1B[2K\rBuilding dependency tree... 0%");
+    let settings = SettingsYaml::get_settings()?;
+    let mut children = Vec::new();
+    let mut seen = HashSet::new();
+    let count = args.len();
+    for (i, package) in args.iter().enumerate() {
+        if let Some(data) = get_package(&settings.sources, package, false, &mut seen).await? {
+            children.push(data);
+        }
+        print!("\rBuilding dependency tree... {}%", i * 100 / count);
+        let _ = std::io::stdout().flush();
+    }
+    print!("\rBuilding dependency tree... Done!");
+    Ok(children)
+}
+
+async fn get_package(
+    sources: &[String],
+    dep: &(&String, Option<&String>),
+    dependent: bool,
+    prior: &mut HashSet<Specific>,
+) -> Result<Option<InstallPackage>, String> {
+    let (app, version) = dep;
+    let metadata =
+        match ProcessedMetaData::get_metadata(app, version.map(|x| x.as_str()), sources, dependent)
+            .await
+        {
+            Some(data) => data,
+            None => return err!("Failed to parse package `{app}`'s metadata!"),
+        };
+    if let Ok(installed) = InstalledMetaData::open(&metadata.name)
+        && installed
+            .installed
+            .iter()
+            .any(|x| x.version == metadata.version)
+    {
+        return Ok(None);
+    };
+    match ProcessedMetaData::get_depends(&metadata, sources, prior).await {
+        Ok(data) => Ok(Some(data)),
+        Err(fault) => err!("{fault}"),
+    }
+}
+
+/* #endregion Install */

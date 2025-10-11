@@ -3,9 +3,9 @@ use std::{env, path::Path};
 pub use {
     commands::Command,
     flags::Flag,
-    settings::SettingsYaml,
+    settings::{SettingsYaml, acquire_lock},
     statebox::StateBox,
-    utils::{PostAction, err},
+    utils::{PostAction, choice, err},
 };
 
 pub mod emancipate;

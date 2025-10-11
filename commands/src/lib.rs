@@ -273,7 +273,7 @@ impl Command {
         match action {
             PostAction::Elevate => {
                 println!(
-                    "\x1B[91mThe action you attempted to perform requires root privileges.\x1B[0m"
+                    "\x1B[95mThe action you attempted to perform requires root privileges.\x1B[0m"
                 );
                 match choice("Would you like to try perform this action as sudo?", false) {
                     Err(message) => println!("{message}"),
@@ -290,9 +290,11 @@ impl Command {
                 }
             }
             PostAction::Err(code) => std::process::exit(code),
-            PostAction::Fuck(fault) => println!("\x1B[2K\r\x1B[91m{fault}\x1B[0m"),
+            PostAction::Fuck(fault) => println!(
+                "\x1B[2K\rOperation failed!\nReported Error: \"\x1B[91m{fault}\x1B[0m\"\n\x1B[91m=== YOU MAY HAVE BROKEN PACKAGES! ==="
+            ),
             PostAction::GetHelp => println!("{}", self.help()),
-            PostAction::NothingToDo => println!("Nothing to do."),
+            PostAction::NothingToDo => println!("\x1B[95mNothing to do.\x1B[0m"),
             PostAction::PullSources => {
                 match choice("\x1B[2K\rMissing sources.txt! Try pull them now?", false) {
                     Err(message) => println!("{message}"),

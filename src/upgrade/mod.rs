@@ -1,8 +1,9 @@
 use commands::Command;
-use metadata::{upgrade_all, upgrade_only};
+use metadata::{upgrade_all, upgrade_only, upgrade_packages};
 use settings::acquire_lock;
 use statebox::StateBox;
-use utils::PostAction;
+
+use crate::{PostAction, choice};
 
 pub fn build(hierarchy: &[String]) -> Command {
     Command::new(
@@ -51,10 +52,20 @@ fn run(states: &StateBox, args: Option<&[String]>) -> PostAction {
         return PostAction::NothingToDo;
     }
     println!(
-        "The following packages will be UPGRADED: {}",
+        "The following package(s) will be UPGRADED: \x1B[94m{}\x1B[0m",
         data.iter()
             .fold(String::new(), |acc, x| format!("{acc} {}", x.name))
             .trim()
     );
+    if states.get("yes").is_none_or(|x: &bool| !*x) {
+        match choice("Continue?", true) {
+            Err(message) => return PostAction::Fuck(message),
+            Ok(false) => return PostAction::Fuck(String::from("Aborted.")),
+            Ok(true) => (),
+        };
+    }
+    if let Err(fault) = upgrade_packages(&data) {
+        return PostAction::Fuck(fault);
+    }
     PostAction::Return
 }
