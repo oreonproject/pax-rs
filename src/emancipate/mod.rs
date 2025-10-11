@@ -19,10 +19,7 @@ pub fn build(hierarchy: &[String]) -> Command {
 fn run(states: &StateBox, args: Option<&[String]>) -> PostAction {
     match acquire_lock() {
         Ok(Some(action)) => return action,
-        Err(fault) => {
-            println!("\x1B[91m{fault}\x1B[0m");
-            return PostAction::Return;
-        }
+        Err(fault) => return PostAction::Fuck(fault),
         _ => (),
     }
     let mut args = match args {
@@ -39,11 +36,9 @@ fn run(states: &StateBox, args: Option<&[String]>) -> PostAction {
     } else {
         args.for_each(|x| data.push((x, None)));
     }
-    match emancipate(&data) {
-        Ok(()) => (),
-        Err(fault) => {
-            println!("\x1B[2K\r\x1B[91m{fault}\x1B[0m");
-        }
+    if let Err(fault) = emancipate(&data) {
+        PostAction::Fuck(fault)
+    } else {
+        PostAction::Return
     }
-    PostAction::Return
 }

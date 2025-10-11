@@ -782,6 +782,50 @@ fn get_metadata_path(name: &str) -> Result<(PathBuf, Option<InstalledMetaData>),
     }
 }
 
+#[derive(Debug)]
+pub struct QueuedChanges {
+    pub primary: HashSet<Specific>,
+    pub secondary: HashSet<Specific>,
+}
+
+impl QueuedChanges {
+    pub fn new() -> Self {
+        QueuedChanges {
+            primary: HashSet::new(),
+            secondary: HashSet::new(),
+        }
+    }
+    pub fn extend(&mut self, other: Self) {
+        self.primary.extend(other.primary);
+        self.secondary.extend(other.secondary);
+    }
+    pub fn insert_primary(&mut self, other: Specific) -> bool {
+        self.primary.insert(other)
+    }
+    pub fn insert_secondary(&mut self, other: Specific) {
+        self.secondary.insert(other);
+    }
+    pub fn is_empty(&self) -> bool {
+        self.primary.is_empty()
+    }
+    pub fn has_deps(&self) -> bool {
+        !self.secondary.is_empty()
+    }
+    pub fn dependents(&mut self) -> Result<(), String> {
+        let mut items = self.primary.iter().cloned().collect::<Vec<Specific>>();
+        items.extend_from_slice(&self.secondary.iter().cloned().collect::<Vec<Specific>>());
+        for item in items {
+            item.get_dependents(self)?;
+        }
+        Ok(())
+    }
+}
+
+impl Default for QueuedChanges {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 /* #region Remove/Purge */
 pub async fn get_local_deps(args: &[(&String, Option<&String>)]) -> Result<QueuedChanges, String> {
     print!("\x1B[2K\rCollecting dependencies... 0%");
@@ -840,50 +884,6 @@ async fn get_local_dep(
     Ok(result)
 }
 
-#[derive(Debug)]
-pub struct QueuedChanges {
-    pub primary: HashSet<Specific>,
-    pub secondary: HashSet<Specific>,
-}
-
-impl QueuedChanges {
-    pub fn new() -> Self {
-        QueuedChanges {
-            primary: HashSet::new(),
-            secondary: HashSet::new(),
-        }
-    }
-    pub fn extend(&mut self, other: Self) {
-        self.primary.extend(other.primary);
-        self.secondary.extend(other.secondary);
-    }
-    pub fn insert_primary(&mut self, other: Specific) -> bool {
-        self.primary.insert(other)
-    }
-    pub fn insert_secondary(&mut self, other: Specific) {
-        self.secondary.insert(other);
-    }
-    pub fn is_empty(&self) -> bool {
-        self.primary.is_empty()
-    }
-    pub fn has_deps(&self) -> bool {
-        !self.secondary.is_empty()
-    }
-    pub fn dependents(&mut self) -> Result<(), String> {
-        let mut items = self.primary.iter().cloned().collect::<Vec<Specific>>();
-        items.extend_from_slice(&self.secondary.iter().cloned().collect::<Vec<Specific>>());
-        for item in items {
-            item.get_dependents(self)?;
-        }
-        Ok(())
-    }
-}
-
-impl Default for QueuedChanges {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 /* #endregion Remove/Purge */
 /* #region Update */
 pub async fn collect_upgrades() -> Result<(), String> {

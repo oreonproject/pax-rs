@@ -40,10 +40,7 @@ fn purge(states: &StateBox, args: Option<&[String]>) -> PostAction {
 fn run(states: &StateBox, args: Option<&[String]>, purge: bool) -> PostAction {
     match acquire_lock() {
         Ok(Some(action)) => return action,
-        Err(fault) => {
-            println!("\x1B[91m{fault}\x1B[0m");
-            return PostAction::Return;
-        }
+        Err(fault) => return PostAction::Fuck(fault),
         _ => (),
     }
     let mut args = match args {
@@ -60,12 +57,8 @@ fn run(states: &StateBox, args: Option<&[String]>, purge: bool) -> PostAction {
     } else {
         args.for_each(|x| data.push((x, None)));
     }
-    let runtime = match Runtime::new() {
-        Ok(runtime) => runtime,
-        Err(_) => {
-            println!("Error creating runtime!");
-            return PostAction::Return;
-        }
+    let Ok(runtime) = Runtime::new() else {
+        return PostAction::Fuck(String::from("Error creating runtime!"));
     };
     match runtime.block_on(get_local_deps(&data)) {
         Ok(metadatas) => {
@@ -93,32 +86,21 @@ fn run(states: &StateBox, args: Option<&[String]>, purge: bool) -> PostAction {
                 );
                 if states.get("yes").is_none_or(|x: &bool| !*x) {
                     match choice("Continue?", true) {
-                        Err(message) => {
-                            println!("{message}");
-                            return PostAction::Return;
-                        }
-                        Ok(false) => {
-                            println!("Aborted.");
-                            return PostAction::Return;
-                        }
+                        Err(message) => return PostAction::Fuck(message),
+                        Ok(false) => return PostAction::Fuck(String::from("Aborted.")),
                         Ok(true) => (),
                     };
                 }
             }
             for package in metadatas.primary {
-                match package.remove_version(purge) {
-                    Ok(()) => (),
-                    Err(message) => {
-                        println!("Operation failed!\nReported Error: \"\x1B[91m{message}\x1B[0m\"");
-                        println!("\x1B[91m=== YOU MAY HAVE BROKEN PACKAGES! ===\x1B[0m");
-                        return PostAction::Return;
-                    }
+                if let Err(message) = package.remove_version(purge) {
+                    return PostAction::Fuck(format!(
+                        "Operation failed!\nReported Error: \"\x1B[91m{message}\n\x1B[91m=== YOU MAY HAVE BROKEN PACKAGES! ==="
+                    ));
                 };
             }
+            PostAction::Return
         }
-        Err(fault) => {
-            println!("\x1B[2K\r\x1B[91m{fault}\x1B[0m");
-        }
-    };
-    PostAction::Return
+        Err(fault) => PostAction::Fuck(fault),
+    }
 }

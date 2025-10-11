@@ -290,6 +290,7 @@ impl Command {
                 }
             }
             PostAction::Err(code) => std::process::exit(code),
+            PostAction::Fuck(fault) => println!("\x1B[2K\r\x1B[91m{fault}\x1B[0m"),
             PostAction::GetHelp => println!("{}", self.help()),
             PostAction::NothingToDo => println!("Nothing to do."),
             PostAction::PullSources => {

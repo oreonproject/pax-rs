@@ -19,10 +19,8 @@ pub fn build(hierarchy: &[String]) -> Command {
 fn run(states: &StateBox, args: Option<&[String]>) -> PostAction {
     match acquire_lock() {
         Ok(Some(action)) => return action,
-        Err(fault) => {
-            println!("\x1B[91m{fault}\x1B[0m");
-            return PostAction::Return;
-        }
+        Err(fault) => return PostAction::Fuck(fault),
+
         _ => (),
     }
     let args = if let Some(args) = args {
@@ -47,10 +45,16 @@ fn run(states: &StateBox, args: Option<&[String]>) -> PostAction {
         upgrade_only(&args)
     } {
         Ok(data) => data,
-        Err(fault) => {
-            println!("\x1B[2K\r\x1B[91m{fault}\x1B[0m");
-            return PostAction::Return;
-        }
+        Err(fault) => return PostAction::Fuck(fault),
     };
+    if data.is_empty() {
+        return PostAction::NothingToDo;
+    }
+    println!(
+        "The following packages will be UPGRADED: {}",
+        data.iter()
+            .fold(String::new(), |acc, x| format!("{acc} {}", x.name))
+            .trim()
+    );
     PostAction::Return
 }

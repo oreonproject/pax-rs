@@ -21,10 +21,7 @@ pub fn build(hierarchy: &[String]) -> Command {
 fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
     match acquire_lock() {
         Ok(Some(action)) => return action,
-        Err(fault) => {
-            println!("\x1B[91m{fault}\x1B[0m");
-            return PostAction::Return;
-        }
+        Err(fault) => return PostAction::Fuck(fault),
         _ => (),
     }
     let args = match args {
@@ -39,12 +36,8 @@ fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
     if sources.is_empty() {
         return PostAction::PullSources;
     }
-    let runtime = match Runtime::new() {
-        Ok(runtime) => runtime,
-        Err(_) => {
-            println!("Error creating runtime!");
-            return PostAction::Return;
-        }
+    let Ok(runtime) = Runtime::new() else {
+        return PostAction::Fuck(String::from("Error creating runtime!"));
     };
     match build_deps(args, &sources, &runtime, &mut HashSet::new(), false) {
         Ok(mut packages) => {
@@ -58,24 +51,25 @@ fn run(_: &StateBox, args: Option<&[String]>) -> PostAction {
                             Ok(file) => match file {
                                 Some(file) => {
                                     if fs::remove_file(&file).is_err() {
-                                        println!("Failed to free {}!", file.display());
-                                        return PostAction::Return;
+                                        return PostAction::Fuck(format!(
+                                            "Failed to free {}!",
+                                            file.display()
+                                        ));
                                     }
                                 }
                                 None => println!("{name} is already at the latest version."),
                             },
                             Err(message) => {
-                                println!(
-                                    "Error installing package {name}!\nReported error: \"\x1B[91m{message}\x1B[0m\"",
-                                );
-                                return PostAction::Return;
+                                return PostAction::Fuck(format!(
+                                    "\x1B[0mError installing package {name}!\nReported error: \"\x1B[91m{message}\x1B[0m\""
+                                ));
                             }
                         }
                     }
                 }
             }
         }
-        Err(fault) => println!("\x1B[2K\r\x1B[91m{fault}\x1B[0m"),
+        Err(fault) => return PostAction::Fuck(fault),
     }
     PostAction::Return
 }

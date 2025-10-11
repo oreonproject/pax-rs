@@ -31,10 +31,7 @@ fn get_endpoints(states: &StateBox, _args: Option<&[String]>) -> PostAction {
     match acquire_lock() {
         Ok(Some(PostAction::PullSources)) => (),
         Ok(Some(action)) => return action,
-        Err(fault) => {
-            println!("\x1B[91m{fault}\x1B[0m");
-            return PostAction::Return;
-        }
+        Err(fault) => return PostAction::Fuck(fault),
         _ => (),
     }
     if states.get::<bool>("force").is_none_or(|x| !*x) {
@@ -45,23 +42,14 @@ To continue anyway, run with flag `\x1B[35m--{LONG_NAME}\x1B[0m`."
         );
     } else {
         println!("Pulling sources...");
-        let runtime = match Runtime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => {
-                println!("Error creating runtime!");
-                return PostAction::Return;
-            }
+        let Ok(runtime) = Runtime::new() else {
+            return PostAction::Fuck(String::from("Error creating runtime!"));
         };
         let result = runtime.block_on(get_sources());
-        match write_sources(result) {
-            Ok(()) => {
-                println!("Done!");
-            }
-            Err(e) => {
-                println!("Failed to save sources! Are you sudo?");
-                println!("Reported error: \"\x1B[91m{e}\x1B[0m\"");
-                return PostAction::Return;
-            }
+        if let Err(fault) = write_sources(result) {
+            return PostAction::Fuck(fault);
+        } else {
+            println!("Done!");
         }
     }
     PostAction::Return

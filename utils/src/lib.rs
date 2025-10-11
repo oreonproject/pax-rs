@@ -7,6 +7,7 @@ use nix::unistd;
 pub enum PostAction {
     Elevate,
     Err(i32),
+    Fuck(String),
     GetHelp,
     NothingToDo,
     PullSources,

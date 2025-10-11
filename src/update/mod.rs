@@ -19,24 +19,15 @@ pub fn build(hierarchy: &[String]) -> Command {
 fn run(_states: &StateBox, _args: Option<&[String]>) -> PostAction {
     match acquire_lock() {
         Ok(Some(action)) => return action,
-        Err(fault) => {
-            println!("\x1B[91m{fault}\x1B[0m");
-            return PostAction::Return;
-        }
+        Err(fault) => return PostAction::Fuck(fault),
         _ => (),
     }
-    let runtime = match Runtime::new() {
-        Ok(runtime) => runtime,
-        Err(_) => {
-            println!("Error creating runtime!");
-            return PostAction::Return;
-        }
+    let Ok(runtime) = Runtime::new() else {
+        return PostAction::Fuck(String::from("Error creating runtime!"));
     };
-    match runtime.block_on(collect_upgrades()) {
-        Ok(()) => (),
-        Err(fault) => {
-            println!("\x1B[2K\r\x1B[91m{fault}\x1B[0m");
-        }
+    if let Err(fault) = runtime.block_on(collect_upgrades()) {
+        PostAction::Fuck(fault)
+    } else {
+        PostAction::Return
     }
-    PostAction::Return
 }
