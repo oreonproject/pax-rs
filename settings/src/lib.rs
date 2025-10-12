@@ -13,6 +13,7 @@ use utils::{PostAction, err, get_dir, is_root};
 pub struct SettingsYaml {
     pub locked: bool,
     pub version: String,
+    pub exec: Option<String>,
     pub sources: Vec<String>,
 }
 
@@ -21,6 +22,7 @@ impl SettingsYaml {
         SettingsYaml {
             locked: false,
             version: env!("SETTINGS_YAML_VERSION").to_string(),
+            exec: None,
             sources: Vec::new(),
         }
     }
@@ -97,45 +99,45 @@ pub fn acquire_lock() -> Result<Option<PostAction>, String> {
     let mut settings = SettingsYaml::get_settings()?;
     loop {
         if settings.locked {
-            for i in 0..100 {
+            for i in 0..20 {
                 print!(
                     "\x1B[2K\r\x1B[91mAwaiting program lock. Retrying in {:.2}s...\x1B[0m",
-                    (500 - i) as f32 / 100f32
+                    (100 - i) as f32 / 20f32
                 );
                 let _ = std::io::stdout().flush();
-                sleep(Duration::from_millis(10));
+                sleep(Duration::from_millis(50));
             }
-            for i in 0..100 {
+            for i in 0..20 {
                 print!(
                     "\x1B[2K\r\x1B[93mAwaiting program lock. Retrying in {:.2}s\x1B[0m...",
-                    (400 - i) as f32 / 100f32
+                    (80 - i) as f32 / 20f32
                 );
                 let _ = std::io::stdout().flush();
-                sleep(Duration::from_millis(10));
+                sleep(Duration::from_millis(50));
             }
-            for i in 0..100 {
+            for i in 0..20 {
                 print!(
                     "\x1B[2K\r\x1B[95mAwaiting program lock. Retrying in {:.2}s\x1B[0m...",
-                    (300 - i) as f32 / 100f32
+                    (60 - i) as f32 / 20f32
                 );
                 let _ = std::io::stdout().flush();
-                sleep(Duration::from_millis(10));
+                sleep(Duration::from_millis(50));
             }
-            for i in 0..100 {
+            for i in 0..20 {
                 print!(
                     "\x1B[2K\r\x1B[94mAwaiting program lock. Retrying in {:.2}s\x1B[0m...",
-                    (200 - i) as f32 / 100f32
+                    (40 - i) as f32 / 20f32
                 );
                 let _ = std::io::stdout().flush();
-                sleep(Duration::from_millis(10));
+                sleep(Duration::from_millis(50));
             }
-            for i in 0..100 {
+            for i in 0..20 {
                 print!(
                     "\x1B[2K\r\x1B[92mAwaiting program lock. Retrying in {:.2}s\x1B[0m...",
-                    (100 - i) as f32 / 100f32
+                    (20 - i) as f32 / 20f32
                 );
                 let _ = std::io::stdout().flush();
-                sleep(Duration::from_millis(10));
+                sleep(Duration::from_millis(50));
             }
             println!("\x1B[2K\r\x1B[92mAwaiting program lock. Retrying now\x1B[0m...");
             settings = SettingsYaml::get_settings()?;

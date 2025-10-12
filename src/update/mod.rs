@@ -1,8 +1,9 @@
+use commands::Command;
 use metadata::collect_updates;
 use settings::acquire_lock;
+use statebox::StateBox;
 use tokio::runtime::Runtime;
-
-use crate::{Command, PostAction, StateBox};
+use utils::PostAction;
 
 pub fn build(hierarchy: &[String]) -> Command {
     Command::new(

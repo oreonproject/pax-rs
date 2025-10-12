@@ -1,7 +1,8 @@
+use commands::Command;
 use metadata::emancipate;
 use settings::acquire_lock;
-
-use crate::{Command, PostAction, StateBox};
+use statebox::StateBox;
+use utils::PostAction;
 
 pub fn build(hierarchy: &[String]) -> Command {
     Command::new(

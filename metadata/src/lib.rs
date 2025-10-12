@@ -45,8 +45,10 @@ pub struct ProcessedCompilable {
 }
 
 impl ProcessedMetaData {
-    pub async fn to_installed(&self, sources: &[String]) -> InstalledVersion {
-        InstalledVersion {
+    pub async fn to_installed(&self, sources: &[String]) -> InstalledMetaData {
+        InstalledMetaData {
+            locked: false,
+            name: self.name.clone(),
             kind: self.kind.clone(),
             version: self.version.to_string(),
             origin: self.origin.clone(),
@@ -97,26 +99,19 @@ impl ProcessedMetaData {
         println!("Installing {name}...");
         let (path, loaded_data) = get_metadata_path(&name)?;
         let metadata = runtime.block_on(self.to_installed(sources));
-        let mut loaded_data = if let Some(data) = loaded_data {
-            data
-        } else {
-            InstalledMetaData {
-                locked: false,
-                name: name.clone(),
-                installed: Vec::new(),
-            }
-        };
         let deps = metadata.dependencies.clone();
         let ver = metadata.version.to_string();
-        if loaded_data.installed.iter().any(|x| {
-            Version::parse(&x.version).unwrap_or(Version::new(0, 0, 0))
+        if let Some(loaded_data) = loaded_data {
+            if Version::parse(&loaded_data.version).unwrap_or(Version::new(0, 0, 0))
                 >= Version::parse(&metadata.version).unwrap_or(Version::new(0, 0, 0))
-        }) {
-            return Ok(None);
+            {
+                return Ok(None);
+            } else {
+                // Handle conflict??
+            }
         }
         // Run install thingy
-        loaded_data.installed.push(metadata);
-        loaded_data.write(&path)?;
+        metadata.write(&path)?;
         for dep in deps {
             dep.write_dependent(&name, &ver)?;
         }
@@ -247,7 +242,7 @@ impl ProcessedMetaData {
                     }
                 }
                 DependKind::Volatile(volatile) => {
-                    let mut command = RunCommand::new("which");
+                    let mut command = RunCommand::new("/usr/bin/which");
                     command.arg(volatile);
                     command.stdout(std::process::Stdio::null());
                     command.stderr(std::process::Stdio::null());
@@ -287,18 +282,16 @@ impl ProcessedMetaData {
         sources: &[String],
         runtime: &Runtime,
     ) -> Result<(), String> {
-        let mut installed = InstalledMetaData::open(&package.name)?;
+        let installed = InstalledMetaData::open(&package.name)?;
         let mut to_upgrade = Vec::new();
         if let Some(ver) = current_ver {
-            if let Some(version) = installed.installed.iter_mut().find(|x| x.version == ver) {
-                to_upgrade.push(version);
+            if installed.version == ver {
+                to_upgrade.push(installed);
             } else {
                 return err!("`{}` didn't contain version {}!", package.name, ver);
             }
-        } else {
-            for version in installed.installed.iter_mut().filter(|x| !x.dependent) {
-                to_upgrade.push(version);
-            }
+        } else if !installed.dependent {
+            to_upgrade.push(installed);
         }
         for old_pkg in to_upgrade {
             let new_data = old_pkg
@@ -434,19 +427,14 @@ impl DependKind {
                 if let Some(data) =
                     ProcessedMetaData::get_metadata(latest, None, sources, true).await
                 {
-                    if let Ok(mut subdata) = InstalledMetaData::open(&data.name) {
-                        subdata.installed.sort_by_key(|x| {
-                            Version::parse(&x.version).unwrap_or(Version::new(0, 0, 0))
-                        });
-                        if let Some(sub_latest) = subdata.installed.last()
-                            && Version::parse(&sub_latest.version).unwrap_or(Version::new(0, 0, 0))
-                                >= Version::parse(&data.version).unwrap_or(Version::new(0, 0, 0))
-                        {
-                            return Ok(PseudoProcessed::Specific(Specific {
-                                name: data.name,
-                                version: sub_latest.version.to_string(),
-                            }));
-                        }
+                    if let Ok(subdata) = InstalledMetaData::open(&data.name)
+                        && Version::parse(&subdata.version).unwrap_or(Version::new(0, 0, 0))
+                            >= Version::parse(&data.version).unwrap_or(Version::new(0, 0, 0))
+                    {
+                        return Ok(PseudoProcessed::Specific(Specific {
+                            name: data.name,
+                            version: subdata.version.to_string(),
+                        }));
                     }
                     Ok(PseudoProcessed::MetaData(Box::new(data)))
                 } else {
@@ -463,7 +451,9 @@ impl DependKind {
                 }
             }
             Self::Volatile(volatile) => {
-                if let Ok(Some(status)) = RunCommand::new("which").status().map(|x| x.code()) {
+                if let Ok(Some(status)) =
+                    RunCommand::new("/usr/bin/which").status().map(|x| x.code())
+                {
                     if status != 0 {
                         Ok(PseudoProcessed::Volatile)
                     } else if let Some(data) =
@@ -494,17 +484,13 @@ impl Specific {
             && path.is_file()
             && let Some(mut data) = data
         {
-            if let Some(bit) = data
-                .installed
-                .iter_mut()
-                .find(|x| x.version == *self.version)
-            {
+            if data.version == self.version {
                 let their_dep = Self {
                     name: their_name.to_string(),
                     version: their_ver.to_string(),
                 };
-                if !bit.dependents.contains(&their_dep) {
-                    bit.dependents.push(their_dep);
+                if !data.dependents.contains(&their_dep) {
+                    data.dependents.push(their_dep);
                 }
             }
             let mut file = match File::create(&path) {
@@ -538,7 +524,7 @@ impl Specific {
     }
     pub fn get_dependents(&self, queued: &mut QueuedChanges) -> Result<(), String> {
         let data = InstalledMetaData::open(&self.name)?;
-        if let Some(data) = data.installed.iter().find(|x| x.version == self.version) {
+        if data.version == self.version {
             for dependent in &data.dependents {
                 if queued.insert_primary(dependent.clone()) {
                     dependent.get_dependents(queued)?;
@@ -565,45 +551,28 @@ impl Specific {
             );
             return Ok(());
         };
-        let mut data = if let Some(data) = data.lock(&path, &self.name)? {
-            data
-        } else {
+        if data.lock(&path, &self.name)?.is_none() {
             return Ok(());
         };
-        let (index, _child) = match data
-            .installed
-            .iter_mut()
-            .enumerate()
-            .find(|x| x.1.version == self.version)
-        {
-            Some(data) => data,
-            None => {
-                // Same as above.
-                println!(
-                    "\x1B[33m[WARN] Skipping `{}` version {}\x1B[0m (is it installed?)...",
-                    self.name, self.version
-                );
-                return Ok(());
-            }
-        };
-        if purge {
-            // Run purge thingy
-        } else {
-            // Run uninstall thingy
+        match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(_) => err!("Failed to remove `{}`!", &self.name),
         }
-        data.installed.remove(index);
-        data.locked = false;
-        data.write(&path)?;
-        Ok(())
     }
 }
 
-#[derive(PartialEq, Deserialize, Serialize, Debug)]
-
-struct InstalledMetaData {
-    locked: bool,
-    name: String,
-    installed: Vec<InstalledVersion>,
+#[derive(PartialEq, Deserialize, Serialize, Debug, Clone)]
+pub struct InstalledMetaData {
+    pub locked: bool,
+    pub name: String,
+    pub kind: MetaDataKind,
+    pub version: String,
+    pub origin: OriginKind,
+    pub dependent: bool,
+    pub dependencies: Vec<Specific>,
+    pub dependents: Vec<Specific>,
+    pub install_kind: InstalledInstallKind,
+    pub hash: String,
 }
 
 impl InstalledMetaData {
@@ -624,7 +593,7 @@ impl InstalledMetaData {
         })
     }
     pub fn write(self, path: &Path) -> Result<Option<Self>, String> {
-        if self.installed.is_empty() {
+        if self.dependents.is_empty() {
             if fs::remove_file(path).is_err() {
                 err!("Failed to remove {}!", &self.name)
             } else {
@@ -649,7 +618,6 @@ impl InstalledMetaData {
             err!("File is of unexpected type!")
         }
     }
-
     pub fn lock(mut self, path: &Path, name: &str) -> Result<Option<Self>, String> {
         if self.locked {
             println!(
@@ -672,46 +640,20 @@ impl InstalledMetaData {
             Ok(None)
         }
     }
-}
-
-#[derive(PartialEq, Deserialize, Serialize, Debug, Clone)]
-pub struct InstalledVersion {
-    pub kind: MetaDataKind,
-    pub version: String,
-    pub origin: OriginKind,
-    pub dependent: bool,
-    pub dependencies: Vec<Specific>,
-    pub dependents: Vec<Specific>,
-    pub install_kind: InstalledInstallKind,
-    pub hash: String,
-}
-
-impl InstalledVersion {
     // This feels a _little_ bit hacky, so I will probably remove it.
     pub fn clear_dependencies(&self, specific: &Specific) -> Result<(), String> {
         let path = get_metadata_dir()?;
         for dependency in &self.dependencies {
             let mut data = InstalledMetaData::open(&dependency.name)?;
-            let Some(ver) = data
-                .installed
-                .iter_mut()
-                .find(|x| x.version == dependency.version)
-            else {
-                return err!(
-                    "`{}` didn't contain version {}!",
-                    data.name,
-                    dependency.version
-                );
-            };
-            let Some(index) = ver.dependents.iter().position(|x| x == specific) else {
+            let Some(index) = data.dependents.iter().position(|x| x == specific) else {
                 return err!(
                     "`{}` {} didn't contain dependent {}!",
                     data.name,
-                    ver.version,
+                    data.version,
                     specific.name
                 );
             };
-            ver.dependents.remove(index);
+            data.dependents.remove(index);
             let mut path = path.clone();
             path.push(format!("{}.yaml", dependency.name));
             data.write(&path)?;
@@ -919,16 +861,11 @@ async fn get_local_dep(
     let data = InstalledMetaData::open(dep)?;
     let mut working = Vec::new();
     if let Some(ver) = ver {
-        if let Some(specific) = data.installed.iter().find(|x| x.version == *ver) {
-            working.push(specific);
+        if data.version == *ver {
+            working.push(data);
         }
-    } else {
-        working.extend(
-            data.installed
-                .iter()
-                .filter(|x| !x.dependent)
-                .collect::<Vec<&InstalledVersion>>(),
-        );
+    } else if !data.dependent {
+        working.push(data);
     }
     let mut result = QueuedChanges::new();
     for version in working {
@@ -949,7 +886,7 @@ async fn get_local_dep(
         }
         if root {
             result.insert_primary(Specific {
-                name: data.name.to_string(),
+                name: version.name.to_string(),
                 version: version.version.to_string(),
             });
         }
@@ -1018,17 +955,16 @@ async fn collect_update(
     };
     let metadata = InstalledMetaData::open(&name)?;
     let name = metadata.name;
-    for version in metadata.installed {
-        let name = name.to_string();
-        if version.dependents.is_empty()
-            && !version.dependent
-            && let Some(data) = ProcessedMetaData::get_metadata(&name, None, sources, true).await
-            && Version::parse(&data.version).unwrap_or(Version::new(0, 0, 0))
-                > Version::parse(&version.version).unwrap_or(Version::new(0, 0, 0))
-        {
-            result.push(data);
-        }
+    let name = name.to_string();
+    if metadata.dependents.is_empty()
+        && !metadata.dependent
+        && let Some(data) = ProcessedMetaData::get_metadata(&name, None, sources, true).await
+        && Version::parse(&data.version).unwrap_or(Version::new(0, 0, 0))
+            > Version::parse(&metadata.version).unwrap_or(Version::new(0, 0, 0))
+    {
+        result.push(data);
     }
+
     Ok(result)
 }
 /* #endregion Update */
@@ -1044,32 +980,23 @@ pub fn emancipate(data: &[(&String, Option<&String>)]) -> Result<(), String> {
         };
         if let Some(ver) = ver {
             println!("Emancipating `{dep}` version {ver}...",);
-            if let Some(specific) = data.installed.iter_mut().find(|x| x.version == *ver) {
-                if !specific.dependent {
+            if data.version == *ver {
+                if !data.dependent {
                     println!(
                         "\x1B[33m[WARN] `{dep}` version {ver} is already independent!\x1B[0m..."
                     );
                     continue;
                 }
-                specific.dependent = false;
+                data.dependent = false;
             }
         } else {
             println!("Emancipating `{dep}`...",);
-            let mut collection = data
-                .installed
-                .iter_mut()
-                .filter(|x| x.dependent)
-                .collect::<Vec<&mut InstalledVersion>>();
-            match collection.len() {
-                0 => println!(
+            if data.dependent {
+                data.dependent = false;
+            } else {
+                println!(
                     "\x1B[33m[WARN] All versions of `{dep}` are already independent!\x1B[0m...",
-                ),
-                1 => collection.iter_mut().for_each(|x| x.dependent = false),
-                _ => {
-                    return err!(
-                        "Ambiguous reference to `{dep}`. Use with `-s` to specify a version."
-                    );
-                }
+                );
             }
         };
         data.write(&path)?;
@@ -1207,13 +1134,11 @@ async fn get_package(
             None => return err!("Failed to parse package `{app}`'s metadata!"),
         };
     if let Ok(installed) = InstalledMetaData::open(&metadata.name)
-        && installed
-            .installed
-            .iter()
-            .any(|x| x.version == metadata.version)
+        && installed.version == metadata.version
     {
         return Ok(None);
     };
+    // else {handle conflicts!!!}
     match ProcessedMetaData::get_depends(&metadata, sources, prior).await {
         Ok(data) => Ok(Some(data)),
         Err(fault) => err!("{fault}"),

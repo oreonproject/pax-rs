@@ -1,7 +1,9 @@
+use commands::Command;
 use metadata::get_local_deps;
+use settings::acquire_lock;
+use statebox::StateBox;
 use tokio::runtime::Runtime;
-
-use crate::{Command, PostAction, StateBox, acquire_lock, choice};
+use utils::{PostAction, choice};
 
 pub fn build_remove(hierarchy: &[String]) -> Command {
     Command::new(

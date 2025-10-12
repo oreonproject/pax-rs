@@ -99,7 +99,20 @@ impl Command {
             commands = String::from("\nAvailable Commands:\n");
             for command in subcommands {
                 let command = (command)(&[]);
-                commands.push_str(&format!("  {}\t{}\n", command.name, command.about));
+                commands.push_str(&format!(
+                    "  {}{}\t{}\n",
+                    command.name,
+                    {
+                        let mut str = String::new();
+                        let mut i = 8 - command.name.len() as isize;
+                        while i > 0 {
+                            str.push(' ');
+                            i -= 1;
+                        }
+                        str
+                    },
+                    command.about
+                ));
             }
         }
         if self.aliases != Vec::<String>::new() {

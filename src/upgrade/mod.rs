@@ -2,8 +2,7 @@ use commands::Command;
 use metadata::{upgrade_all, upgrade_only, upgrade_packages};
 use settings::acquire_lock;
 use statebox::StateBox;
-
-use crate::{PostAction, choice};
+use utils::{PostAction, choice};
 
 pub fn build(hierarchy: &[String]) -> Command {
     Command::new(

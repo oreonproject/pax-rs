@@ -1,13 +1,6 @@
 use std::{env, path::Path};
 
-pub use {
-    commands::Command,
-    flags::Flag,
-    settings::{SettingsYaml, acquire_lock},
-    statebox::StateBox,
-    utils::{PostAction, choice, err},
-};
-
+pub mod configure;
 pub mod emancipate;
 pub mod install;
 pub mod pax_init;
@@ -25,12 +18,13 @@ pub fn main() {
         .unwrap_or(None)
         .unwrap_or("pax");
     // Main command
-    let main_command = Command::new(
+    let main_command = commands::Command::new(
         name,
         Vec::new(),
         "PAX is the official package manager for Oreon 11.",
         vec![],
         Some(vec![
+            configure::build,
             emancipate::build,
             install::build,
             pax_init::build,
@@ -39,7 +33,7 @@ pub fn main() {
             update::build,
             upgrade::build,
         ]),
-        |_command, _args| PostAction::GetHelp,
+        |_command, _args| utils::PostAction::GetHelp,
         &[],
     );
     // Run the command with the provided arguments
