@@ -1,6 +1,7 @@
 use semver::Version;
 use serde::{Deserialize, Serialize};
-use settings::SettingsYaml;
+use settings::{OriginKind, SettingsYaml};
+use std::cmp::Ordering;
 use std::hash::Hash;
 use std::{
     collections::HashSet,
@@ -45,7 +46,7 @@ pub struct ProcessedCompilable {
 }
 
 impl ProcessedMetaData {
-    pub async fn to_installed(&self, sources: &[String]) -> InstalledMetaData {
+    pub async fn to_installed(&self, sources: &[OriginKind]) -> InstalledMetaData {
         InstalledMetaData {
             locked: false,
             name: self.name.clone(),
@@ -92,7 +93,7 @@ impl ProcessedMetaData {
     }
     pub fn install_package(
         self,
-        sources: &[String],
+        sources: &[OriginKind],
         runtime: &Runtime,
     ) -> Result<Option<PathBuf>, String> {
         let name = self.name.to_string();
@@ -163,26 +164,39 @@ impl ProcessedMetaData {
     pub async fn get_metadata(
         app: &str,
         version: Option<&str>,
-        sources: &[String],
+        sources: &[OriginKind],
         dependent: bool,
     ) -> Option<Self> {
         let mut metadata = None;
-        for source in sources {
-            metadata = {
-                let endpoint = if let Some(version) = version {
-                    format!("{source}/packages/metadata/{app}?v={version}")
-                } else {
-                    format!("{source}/packages/metadata/{app}")
-                };
-                let body = reqwest::get(endpoint).await.ok()?.text().await.ok()?;
-                if let Ok(raw_pax) = serde_json::from_str::<RawPax>(&body)
-                    && let Some(processed) = raw_pax.process(dependent)
-                {
-                    Some(processed)
-                } else {
-                    None
+        let mut sources = sources.iter();
+        while let (Some(source), None) = (sources.next(), &metadata) {
+            match source {
+                OriginKind::Pax(source) => {
+                    metadata = {
+                        let endpoint = if let Some(version) = version {
+                            format!("{source}/packages/metadata/{app}?v={version}")
+                        } else {
+                            format!("{source}/packages/metadata/{app}")
+                        };
+                        let body = reqwest::get(endpoint).await.ok()?.text().await.ok()?;
+                        if let Ok(raw_pax) = serde_json::from_str::<RawPax>(&body)
+                            && let Some(processed) = raw_pax.process(dependent)
+                        {
+                            Some(processed)
+                        } else {
+                            None
+                        }
+                    };
                 }
-            };
+                OriginKind::Github {
+                    user: _,
+                    repo: _,
+                    commit: _,
+                } => (),
+            }
+            if metadata.is_some() {
+                break;
+            }
         }
         metadata
     }
@@ -211,7 +225,7 @@ impl ProcessedMetaData {
     }
     pub async fn get_depends(
         metadata: &Self,
-        sources: &[String],
+        sources: &[OriginKind],
         prior: &mut HashSet<Specific>,
     ) -> Result<InstallPackage, String> {
         let mut package = InstallPackage {
@@ -279,7 +293,7 @@ impl ProcessedMetaData {
         package: &Self,
         current_ver: Option<&str>,
         target_ver: &str,
-        sources: &[String],
+        sources: &[OriginKind],
         runtime: &Runtime,
     ) -> Result<(), String> {
         let installed = InstalledMetaData::open(&package.name)?;
@@ -294,9 +308,7 @@ impl ProcessedMetaData {
             to_upgrade.push(installed);
         }
         for old_pkg in to_upgrade {
-            let new_data = old_pkg
-                .origin
-                .get_ver(target_ver, old_pkg.dependent, runtime)?;
+            let new_data = get_ver(&old_pkg.origin, target_ver, old_pkg.dependent, runtime)?;
             let new_version = Specific {
                 name: new_data.name.to_string(),
                 version: new_data.version.to_string(),
@@ -360,50 +372,38 @@ impl std::fmt::Display for MetaDataKind {
     }
 }
 
-#[derive(PartialEq, Eq, Deserialize, Serialize, Debug, Hash, Clone)]
-pub enum OriginKind {
-    Pax(String),
-    Github {
-        user: String,
-        repo: String,
-        commit: String,
-    },
-}
-
-impl OriginKind {
-    pub fn get_ver(
-        &self,
-        target: &str,
-        dependent: bool,
-        runtime: &Runtime,
-    ) -> Result<ProcessedMetaData, String> {
-        match self {
-            Self::Pax(url) => {
-                let url = url.replace("/package/", "/packages/metadata/");
-                let endpoint = format!("{url}?v={target}");
-                async fn get_data(endpoint: &str) -> Option<String> {
-                    reqwest::get(endpoint).await.ok()?.text().await.ok()
-                }
-                if let Some(body) = runtime.block_on(get_data(&endpoint)) {
-                    if let Ok(raw_pax) = serde_json::from_str::<RawPax>(&body) {
-                        if let Some(processed) = raw_pax.process(dependent) {
-                            Ok(processed)
-                        } else {
-                            err!("Failed to process package data at {url}!")
-                        }
+pub fn get_ver(
+    kind: &OriginKind,
+    target: &str,
+    dependent: bool,
+    runtime: &Runtime,
+) -> Result<ProcessedMetaData, String> {
+    match kind {
+        OriginKind::Pax(url) => {
+            let url = url.replace("/package/", "/packages/metadata/");
+            let endpoint = format!("{url}?v={target}");
+            async fn get_data(endpoint: &str) -> Option<String> {
+                reqwest::get(endpoint).await.ok()?.text().await.ok()
+            }
+            if let Some(body) = runtime.block_on(get_data(&endpoint)) {
+                if let Ok(raw_pax) = serde_json::from_str::<RawPax>(&body) {
+                    if let Some(processed) = raw_pax.process(dependent) {
+                        Ok(processed)
                     } else {
-                        err!("Failed to parse package data at {url}!")
+                        err!("Failed to process package data at {url}!")
                     }
                 } else {
-                    err!("Failed to locate origin {url}!")
+                    err!("Failed to parse package data at {url}!")
                 }
+            } else {
+                err!("Failed to locate origin {url}!")
             }
-            Self::Github {
-                user: _,
-                repo: _,
-                commit: _,
-            } => err!("Not implemented!"),
         }
+        OriginKind::Github {
+            user: _,
+            repo: _,
+            commit: _,
+        } => err!("Not implemented!"),
     }
 }
 
@@ -421,7 +421,7 @@ pub enum DependKind {
 }
 
 impl DependKind {
-    async fn to_processed(&self, sources: &[String]) -> Result<PseudoProcessed, String> {
+    async fn to_processed(&self, sources: &[OriginKind]) -> Result<PseudoProcessed, String> {
         match self {
             Self::Latest(latest) => {
                 if let Some(data) =
@@ -466,6 +466,68 @@ impl DependKind {
                 } else {
                     Err(volatile.to_string())
                 }
+            }
+        }
+    }
+    // since i know i will forget:
+    // Ok(Greater) => Safe to downgrade; choice(false)
+    // Ok(Equal)   => Safe to continue;  no prompt
+    // Ok(Less)    => Safe to upgrade;   choice(true)
+    // Err(Greater)=> Installed is too high;  fail
+    // Err(Equal)  => Couldn't get metadata;  fail
+    // Err(Less)   => Installed is too small; fail
+    pub fn resolve_conflict(
+        &self,
+        installed: &Version,
+        runtime: &Runtime,
+        origin: OriginKind,
+    ) -> Result<Ordering, Ordering> {
+        let theirs_requested = match self {
+            Self::Volatile(_) => return Ok(Ordering::Equal),
+            Self::Specific(specific) => {
+                let Some(metadata) = runtime.block_on(ProcessedMetaData::get_metadata(
+                    &specific.name,
+                    Some(&specific.version),
+                    &[origin],
+                    false,
+                )) else {
+                    return Err(Ordering::Equal);
+                };
+                metadata.version
+            }
+            Self::Latest(latest) => {
+                let Some(metadata) = runtime.block_on(ProcessedMetaData::get_metadata(
+                    latest,
+                    None,
+                    &[origin],
+                    false,
+                )) else {
+                    return Err(Ordering::Equal);
+                };
+                metadata.version
+            }
+        };
+        let theirs_requested = Version::parse(&theirs_requested).unwrap_or(Version::new(0, 0, 0));
+        if installed.major == 0 {
+            match installed.minor.cmp(&theirs_requested.minor) {
+                Ordering::Equal => match installed.patch.cmp(&theirs_requested.patch) {
+                    Ordering::Greater => Err(Ordering::Greater),
+                    Ordering::Equal => Ok(installed.pre.cmp(&theirs_requested.pre)),
+                    Ordering::Less => Ok(Ordering::Less),
+                },
+                order => Err(order),
+            }
+        } else {
+            match installed.major.cmp(&theirs_requested.major) {
+                Ordering::Equal => match installed.minor.cmp(&theirs_requested.minor) {
+                    Ordering::Greater => Err(Ordering::Greater),
+                    Ordering::Equal => match installed.patch.cmp(&theirs_requested.patch) {
+                        Ordering::Equal => Ok(installed.pre.cmp(&theirs_requested.pre)),
+                        order => Ok(order),
+                    },
+                    Ordering::Less => Ok(Ordering::Less),
+                },
+                order => Err(order),
             }
         }
     }
@@ -942,7 +1004,7 @@ pub async fn collect_updates() -> Result<(), String> {
 
 async fn collect_update(
     path: PathBuf,
-    sources: &[String],
+    sources: &[OriginKind],
 ) -> Result<Vec<ProcessedMetaData>, String> {
     let mut result = Vec::new();
     if path.extension().is_none_or(|x| x != "yaml") {
@@ -1091,7 +1153,7 @@ impl InstallPackage {
         }
         data
     }
-    pub fn install(self, sources: &[String], runtime: &Runtime) -> Result<(), String> {
+    pub fn install(self, sources: &[OriginKind], runtime: &Runtime) -> Result<(), String> {
         for dep in self.dependencies {
             dep.install(sources, runtime)?;
         }
@@ -1120,7 +1182,7 @@ pub async fn get_packages(
 }
 
 async fn get_package(
-    sources: &[String],
+    sources: &[OriginKind],
     dep: &(&String, Option<&String>),
     dependent: bool,
     prior: &mut HashSet<Specific>,

@@ -14,12 +14,12 @@ pub struct SettingsYaml {
     pub locked: bool,
     pub version: String,
     pub exec: Option<String>,
-    pub sources: Vec<String>,
+    pub sources: Vec<OriginKind>,
 }
 
 impl SettingsYaml {
     pub fn new() -> Self {
-        SettingsYaml {
+        Self {
             locked: false,
             version: env!("SETTINGS_YAML_VERSION").to_string(),
             exec: None,
@@ -55,6 +55,16 @@ impl SettingsYaml {
         };
         Ok(sources)
     }
+}
+
+#[derive(PartialEq, Eq, Deserialize, Serialize, Debug, Hash, Clone)]
+pub enum OriginKind {
+    Pax(String),
+    Github {
+        user: String,
+        repo: String,
+        commit: String,
+    },
 }
 
 impl Default for SettingsYaml {
