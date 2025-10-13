@@ -372,7 +372,7 @@ impl std::fmt::Display for MetaDataKind {
     }
 }
 
-pub fn get_ver(
+fn get_ver(
     kind: &OriginKind,
     target: &str,
     dependent: bool,

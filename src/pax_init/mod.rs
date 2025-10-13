@@ -1,10 +1,12 @@
 use commands::Command;
 use flags::Flag;
+use settings::OriginKind;
 use settings::SettingsYaml;
 use settings::acquire_lock;
 use statebox::StateBox;
 use tokio::runtime::Runtime;
 use utils::PostAction;
+use utils::err;
 
 static LONG_NAME: &str = "force";
 
@@ -48,8 +50,7 @@ To continue anyway, run with flag `\x1B[35m--{LONG_NAME}\x1B[0m`."
         let Ok(runtime) = Runtime::new() else {
             return PostAction::Fuck(String::from("Error creating runtime!"));
         };
-        let result = runtime.block_on(get_sources());
-        if let Err(fault) = write_sources(result) {
+        if let Err(fault) = runtime.block_on(gen_sources()) {
             return PostAction::Fuck(fault);
         } else {
             println!("Done!");
@@ -58,24 +59,22 @@ To continue anyway, run with flag `\x1B[35m--{LONG_NAME}\x1B[0m`."
     PostAction::Return
 }
 
-async fn get_sources() -> Option<String> {
-    reqwest::get(
+async fn gen_sources() -> Result<(), String> {
+    let Some(sources) = reqwest::get(
         "https://raw.githubusercontent.com/oreonproject/pax-rs/refs/heads/main/endpoints.txt",
     )
     .await
-    .ok()?
-    .text()
-    .await
-    .ok()
-}
-
-fn write_sources(sources: Option<String>) -> Result<(), String> {
+    .ok() else {
+        return err!("Failed to locate sources!");
+    };
+    let Some(sources) = sources.text().await.ok() else {
+        return err!("Failed to read pulled sources!");
+    };
     let mut settings = SettingsYaml::get_settings()?;
-    settings.sources = sources
-        .unwrap_or_default()
-        .trim()
-        .split('\n')
-        .map(|x| x.to_string())
-        .collect();
+    for source in sources.trim().split('\n') {
+        // make this actually detect the source type
+        let source = OriginKind::Pax(source.to_string());
+        settings.sources.push(source);
+    }
     settings.set_settings()
 }
