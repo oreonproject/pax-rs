@@ -78,7 +78,7 @@ impl ProcessedMetaData {
     }
     pub fn install_package(
         self,
-        sources: &[OriginKind],
+        _sources: &[OriginKind],
         runtime: &Runtime,
     ) -> Result<Option<PathBuf>, String> {
         let name = self.name.to_string();
@@ -88,10 +88,9 @@ impl ProcessedMetaData {
         let deps = metadata.dependencies.clone();
         let ver = metadata.version.to_string();
         if let Some(loaded_data) = loaded_data {
-            for dependent in loaded_data.dependents {
+            for _dependent in loaded_data.dependents {
                 // HEY
-                dbg!(sources);
-                dbg!(dependent);
+                // I forgot what is supposed to happen here...
             }
         }
         // Run install thingy
@@ -371,7 +370,7 @@ impl ProcessedMetaData {
                 .iter()
                 .filter(|x| !new_pkg.dependencies.contains(x))
             {
-                old_dep.remove_version(true)?;
+                old_dep.remove(true)?;
             }
             for new_dep in new_pkg
                 .dependencies
@@ -395,7 +394,7 @@ impl ProcessedMetaData {
                     return err!("Failed to get version of `{}`!", new_version.name);
                 }
             }
-            old_version.remove_version(false)?;
+            old_version.remove(false)?;
             match new_data.install_package(sources, runtime) {
                 Ok(_file) => {} // < == ;P
                 Err(fault) => {
@@ -639,7 +638,7 @@ impl Specific {
             )
         }
     }
-    pub fn remove_version(&self, purge: bool) -> Result<(), String> {
+    pub fn remove(&self, purge: bool) -> Result<(), String> {
         let msg = if purge { "Purging" } else { "Removing" };
         println!(
             "{} {} version {}...",
@@ -662,9 +661,15 @@ impl Specific {
             );
             return Ok(());
         };
-        if data.lock(&path, &self.name)?.is_none() {
-            return Ok(());
+        let data = match data.lock(&path, &self.name)? {
+            Some(data) => data,
+            None => return Ok(()),
         };
+        for dep in &data.dependencies {
+            data.clear_dependencies(dep)?;
+            dep.remove(purge)?;
+        }
+        // Run uninstall/purge thingy...
         match fs::remove_file(path) {
             Ok(()) => Ok(()),
             Err(_) => err!("Failed to remove `{}`!", &self.name),
@@ -732,13 +737,13 @@ impl InstalledMetaData {
         }
     }
     pub fn lock(mut self, path: &Path, name: &str) -> Result<Option<Self>, String> {
-        if self.locked {
-            println!(
-                "\x1B[33m[WARN] Package `{}` is busy!\x1B[0m Skipping...",
-                self.name
-            );
-            return Ok(None);
-        }
+        // if self.locked {
+        //     println!(
+        //         "\x1B[33m[WARN] Package `{}` is busy!\x1B[0m Skipping...",
+        //         self.name
+        //     );
+        //     return Ok(None);
+        // }
         self.locked = true;
         if let Some(data) = self.write(path)? {
             Ok(Some(data))
@@ -757,16 +762,17 @@ impl InstalledMetaData {
     pub fn clear_dependencies(&self, specific: &Specific) -> Result<(), String> {
         let path = get_metadata_dir()?;
         for dependency in &self.dependencies {
-            let mut data = InstalledMetaData::open(&dependency.name)?;
-            let Some(index) = data.dependents.iter().position(|x| x == specific) else {
+            // let mut data = InstalledMetaData::open(&dependency.name)?;
+            let mut data = self.clone();
+            let Some(index) = data.dependencies.iter().position(|x| x == specific) else {
                 return err!(
-                    "`{}` {} didn't contain dependent {}!",
+                    "`{}` {} didn't contain dependent `{}`!",
                     data.name,
                     data.version,
                     specific.name
                 );
             };
-            data.dependents.remove(index);
+            data.dependencies.remove(index);
             let mut path = path.clone();
             path.push(format!("{}.yaml", dependency.name));
             data.write(&path)?;

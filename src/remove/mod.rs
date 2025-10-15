@@ -93,7 +93,7 @@ fn run(states: &StateBox, args: Option<&[String]>, purge: bool) -> PostAction {
                 }
             }
             for package in metadatas.primary {
-                if let Err(fault) = package.remove_version(purge) {
+                if let Err(fault) = package.remove(purge) {
                     return PostAction::Fuck(fault);
                 };
             }
