@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 flags.workspace = true
 nix.workspace = true
+serde.workspace = true

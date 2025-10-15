@@ -1,7 +1,5 @@
-use semver::Version;
 use serde::{Deserialize, Serialize};
 use settings::{OriginKind, SettingsYaml};
-use std::cmp::Ordering;
 use std::hash::Hash;
 use std::{
     collections::HashSet,
@@ -11,7 +9,7 @@ use std::{
     process::Command as RunCommand,
 };
 use tokio::runtime::Runtime;
-use utils::{err, get_metadata_dir, get_update_dir, tmpfile};
+use utils::{VerReq, Version, err, get_metadata_dir, get_update_dir, tmpfile};
 
 #[derive(PartialEq, Eq, Serialize, Deserialize, Debug, Hash, Clone)]
 pub struct ProcessedMetaData {
@@ -21,7 +19,7 @@ pub struct ProcessedMetaData {
     pub version: String,
     pub origin: OriginKind,
     pub dependent: bool,
-    pub dependencies: Vec<DependKind>,
+    pub build_dependencies: Vec<DependKind>,
     pub runtime_dependencies: Vec<DependKind>,
     pub install_kind: ProcessedInstallKind,
     pub hash: String,
@@ -46,7 +44,7 @@ pub struct ProcessedCompilable {
 }
 
 impl ProcessedMetaData {
-    pub async fn to_installed(&self, sources: &[OriginKind]) -> InstalledMetaData {
+    pub async fn to_installed(&self) -> InstalledMetaData {
         InstalledMetaData {
             locked: false,
             name: self.name.clone(),
@@ -55,26 +53,13 @@ impl ProcessedMetaData {
             origin: self.origin.clone(),
             dependent: self.dependent,
             dependencies: {
-                let mut children = Vec::new();
-                let mut dependencies = Vec::new();
-                for dep in &self.dependencies {
-                    children.push(dep.to_processed(sources));
-                }
-                for child in children {
-                    if let Ok(child) = child.await {
-                        match child {
-                            PseudoProcessed::MetaData(data) => {
-                                dependencies.push(Specific {
-                                    name: data.name,
-                                    version: data.version,
-                                });
-                            }
-                            PseudoProcessed::Specific(specific) => dependencies.push(specific),
-                            PseudoProcessed::Volatile => (),
-                        }
+                let mut result = Vec::new();
+                for dep in &self.runtime_dependencies {
+                    if let Some(dep) = dep.to_specific().await {
+                        result.push(dep);
                     }
                 }
-                dependencies
+                result
             },
             dependents: Vec::new(),
             install_kind: match &self.install_kind {
@@ -99,16 +84,14 @@ impl ProcessedMetaData {
         let name = self.name.to_string();
         println!("Installing {name}...");
         let (path, loaded_data) = get_metadata_path(&name)?;
-        let metadata = runtime.block_on(self.to_installed(sources));
+        let metadata = runtime.block_on(self.to_installed());
         let deps = metadata.dependencies.clone();
         let ver = metadata.version.to_string();
         if let Some(loaded_data) = loaded_data {
-            if Version::parse(&loaded_data.version).unwrap_or(Version::new(0, 0, 0))
-                >= Version::parse(&metadata.version).unwrap_or(Version::new(0, 0, 0))
-            {
-                return Ok(None);
-            } else {
-                // Handle conflict??
+            for dependent in loaded_data.dependents {
+                // HEY
+                dbg!(sources);
+                dbg!(dependent);
             }
         }
         // Run install thingy
@@ -230,9 +213,10 @@ impl ProcessedMetaData {
     ) -> Result<InstallPackage, String> {
         let mut package = InstallPackage {
             metadata: metadata.clone(),
-            dependencies: Vec::new(),
+            build_deps: Vec::new(),
+            run_deps: Vec::new(),
         };
-        for dep in &metadata.dependencies {
+        for dep in &metadata.runtime_dependencies {
             let dep = match dep {
                 DependKind::Latest(latest) => {
                     if let Some(data) = Self::get_metadata(latest, None, sources, true).await {
@@ -242,14 +226,18 @@ impl ProcessedMetaData {
                     }
                 }
                 DependKind::Specific(specific) => {
-                    if let Some(data) =
-                        Self::get_metadata(&specific.name, Some(&specific.version), sources, true)
-                            .await
+                    if let Some(data) = Self::get_metadata(
+                        &specific.name,
+                        specific.version.to_string().as_deref(),
+                        sources,
+                        true,
+                    )
+                    .await
                     {
                         Some(data)
                     } else {
                         return err!(
-                            "Failed to locate dependency `{}` version {}!",
+                            "Failed to locate dependency `{}` version {:?}!",
                             specific.name,
                             specific.version
                         );
@@ -278,12 +266,71 @@ impl ProcessedMetaData {
             if let Some(dep) = dep {
                 let specific = Specific {
                     name: dep.name.to_string(),
-                    version: dep.version.to_string(),
+                    version: VerReq::Eq(Version::parse(&dep.version)?),
                 };
                 if !prior.contains(&specific) {
                     prior.insert(specific);
                     let child = Box::pin(Self::get_depends(&dep, sources, prior)).await?;
-                    package.dependencies.push(child);
+                    package.run_deps.push(child);
+                }
+            }
+        }
+        for dep in &metadata.build_dependencies {
+            let dep = match dep {
+                DependKind::Latest(latest) => {
+                    if let Some(data) = Self::get_metadata(latest, None, sources, true).await {
+                        Some(data)
+                    } else {
+                        return err!("Failed to locate latest version of dependency `{latest}`");
+                    }
+                }
+                DependKind::Specific(specific) => {
+                    if let Some(data) = Self::get_metadata(
+                        &specific.name,
+                        specific.version.to_string().as_deref(),
+                        sources,
+                        true,
+                    )
+                    .await
+                    {
+                        Some(data)
+                    } else {
+                        return err!(
+                            "Failed to locate dependency `{}` version {:?}!",
+                            specific.name,
+                            specific.version
+                        );
+                    }
+                }
+                DependKind::Volatile(volatile) => {
+                    let mut command = RunCommand::new("/usr/bin/which");
+                    command.arg(volatile);
+                    command.stdout(std::process::Stdio::null());
+                    command.stderr(std::process::Stdio::null());
+                    if let Ok(Some(status)) = command.status().map(|x| x.code())
+                        && status == 0
+                    {
+                        None
+                    } else if let Some(data) =
+                        Self::get_metadata(volatile, None, sources, true).await
+                    {
+                        Some(data)
+                    } else {
+                        return err!(
+                            "Failed to locate latest version of volatile dependency `{volatile}`"
+                        );
+                    }
+                }
+            };
+            if let Some(dep) = dep {
+                let specific = Specific {
+                    name: dep.name.to_string(),
+                    version: VerReq::Eq(Version::parse(&dep.version)?),
+                };
+                if !prior.contains(&specific) {
+                    prior.insert(specific);
+                    let child = Box::pin(Self::get_depends(&dep, sources, prior)).await?;
+                    package.build_deps.push(child);
                 }
             }
         }
@@ -311,14 +358,14 @@ impl ProcessedMetaData {
             let new_data = get_ver(&old_pkg.origin, target_ver, old_pkg.dependent, runtime)?;
             let new_version = Specific {
                 name: new_data.name.to_string(),
-                version: new_data.version.to_string(),
+                version: VerReq::Eq(Version::parse(&new_data.version)?),
             };
             let old_version = Specific {
                 name: new_data.name.to_string(),
-                version: old_pkg.version.to_string(),
+                version: VerReq::Eq(Version::parse(&old_pkg.version)?),
             };
             old_pkg.clear_dependencies(&old_version)?;
-            let new_pkg = runtime.block_on(new_data.to_installed(sources));
+            let new_pkg = runtime.block_on(new_data.to_installed());
             for old_dep in old_pkg
                 .dependencies
                 .iter()
@@ -334,7 +381,7 @@ impl ProcessedMetaData {
                 let mut seen = HashSet::new();
                 if let Some(data) = runtime.block_on(get_package(
                     sources,
-                    &(&new_dep.name, Some(&new_dep.version)),
+                    &(&new_dep.name, new_dep.version.to_string().as_ref()),
                     true,
                     &mut seen,
                 ))? {
@@ -342,7 +389,11 @@ impl ProcessedMetaData {
                 }
             }
             for new_dep in new_pkg.dependents {
-                new_dep.write_dependent(&new_version.name, &new_version.version)?;
+                if let Some(ver) = new_version.version.to_string() {
+                    new_dep.write_dependent(&new_version.name, &ver)?;
+                } else {
+                    return err!("Failed to get version of `{}`!", new_version.name);
+                }
             }
             old_version.remove_version(false)?;
             match new_data.install_package(sources, runtime) {
@@ -407,12 +458,12 @@ fn get_ver(
     }
 }
 
-#[derive(PartialEq, Eq, Debug)]
-enum PseudoProcessed {
-    MetaData(Box<ProcessedMetaData>),
-    Specific(Specific),
-    Volatile,
-}
+// #[derive(PartialEq, Eq, Debug)]
+// enum PseudoProcessed {
+//     MetaData(Box<ProcessedMetaData>),
+//     Specific(Specific),
+//     Volatile,
+// }
 #[derive(PartialEq, Eq, Serialize, Deserialize, Debug, Hash, Clone)]
 pub enum DependKind {
     Latest(String),
@@ -421,50 +472,29 @@ pub enum DependKind {
 }
 
 impl DependKind {
-    async fn to_processed(&self, sources: &[OriginKind]) -> Result<PseudoProcessed, String> {
-        match self {
-            Self::Latest(latest) => {
-                if let Some(data) =
-                    ProcessedMetaData::get_metadata(latest, None, sources, true).await
-                {
-                    if let Ok(subdata) = InstalledMetaData::open(&data.name)
-                        && Version::parse(&subdata.version).unwrap_or(Version::new(0, 0, 0))
-                            >= Version::parse(&data.version).unwrap_or(Version::new(0, 0, 0))
-                    {
-                        return Ok(PseudoProcessed::Specific(Specific {
-                            name: data.name,
-                            version: subdata.version.to_string(),
-                        }));
-                    }
-                    Ok(PseudoProcessed::MetaData(Box::new(data)))
-                } else {
-                    Err(latest.to_string())
-                }
-            }
-            Self::Specific(Specific { name, version }) => {
-                if let Some(data) =
-                    ProcessedMetaData::get_metadata(name, Some(version), sources, true).await
-                {
-                    Ok(PseudoProcessed::MetaData(Box::new(data)))
-                } else {
-                    Err(name.to_string())
-                }
-            }
+    pub async fn to_specific(&self) -> Option<Specific> {
+        match &self {
+            Self::Latest(latest) => Some(Specific {
+                name: latest.to_string(),
+                version: VerReq::Eq(Version::parse(&get_latest(latest).await.ok()?).ok()?),
+            }),
+            Self::Specific(specific) => Some(specific.clone()),
             Self::Volatile(volatile) => {
-                if let Ok(Some(status)) =
-                    RunCommand::new("/usr/bin/which").status().map(|x| x.code())
+                let mut command = RunCommand::new("/usr/bin/which");
+                command.arg(volatile);
+                command.stdout(std::process::Stdio::null());
+                command.stderr(std::process::Stdio::null());
+                if let Ok(Some(status)) = command.status().map(|x| x.code())
+                    && status == 0
                 {
-                    if status != 0 {
-                        Ok(PseudoProcessed::Volatile)
-                    } else if let Some(data) =
-                        ProcessedMetaData::get_metadata(volatile, None, sources, true).await
-                    {
-                        Ok(PseudoProcessed::MetaData(Box::new(data)))
-                    } else {
-                        Err(volatile.to_string())
-                    }
+                    None
                 } else {
-                    Err(volatile.to_string())
+                    Some(Specific {
+                        name: volatile.to_string(),
+                        version: VerReq::Eq(
+                            Version::parse(&get_latest(volatile).await.ok()?).ok()?,
+                        ),
+                    })
                 }
             }
         }
@@ -476,67 +506,67 @@ impl DependKind {
     // Err(Greater)=> Installed is too high;  fail
     // Err(Equal)  => Couldn't get metadata;  fail
     // Err(Less)   => Installed is too small; fail
-    pub fn resolve_conflict(
-        &self,
-        installed: &Version,
-        runtime: &Runtime,
-        origin: OriginKind,
-    ) -> Result<Ordering, Ordering> {
-        let theirs_requested = match self {
-            Self::Volatile(_) => return Ok(Ordering::Equal),
-            Self::Specific(specific) => {
-                let Some(metadata) = runtime.block_on(ProcessedMetaData::get_metadata(
-                    &specific.name,
-                    Some(&specific.version),
-                    &[origin],
-                    false,
-                )) else {
-                    return Err(Ordering::Equal);
-                };
-                metadata.version
-            }
-            Self::Latest(latest) => {
-                let Some(metadata) = runtime.block_on(ProcessedMetaData::get_metadata(
-                    latest,
-                    None,
-                    &[origin],
-                    false,
-                )) else {
-                    return Err(Ordering::Equal);
-                };
-                metadata.version
-            }
-        };
-        let theirs_requested = Version::parse(&theirs_requested).unwrap_or(Version::new(0, 0, 0));
-        if installed.major == 0 {
-            match installed.minor.cmp(&theirs_requested.minor) {
-                Ordering::Equal => match installed.patch.cmp(&theirs_requested.patch) {
-                    Ordering::Greater => Err(Ordering::Greater),
-                    Ordering::Equal => Ok(installed.pre.cmp(&theirs_requested.pre)),
-                    Ordering::Less => Ok(Ordering::Less),
-                },
-                order => Err(order),
-            }
-        } else {
-            match installed.major.cmp(&theirs_requested.major) {
-                Ordering::Equal => match installed.minor.cmp(&theirs_requested.minor) {
-                    Ordering::Greater => Err(Ordering::Greater),
-                    Ordering::Equal => match installed.patch.cmp(&theirs_requested.patch) {
-                        Ordering::Equal => Ok(installed.pre.cmp(&theirs_requested.pre)),
-                        order => Ok(order),
-                    },
-                    Ordering::Less => Ok(Ordering::Less),
-                },
-                order => Err(order),
-            }
-        }
-    }
+    // pub fn resolve_conflict(
+    //     &self,
+    //     installed: &Version,
+    //     runtime: &Runtime,
+    //     origin: OriginKind,
+    // ) -> Result<Ordering, Ordering> {
+    //     let theirs_requested = match self {
+    //         Self::Volatile(_) => return Ok(Ordering::Equal),
+    //         Self::Specific(specific) => {
+    //             let Some(metadata) = runtime.block_on(ProcessedMetaData::get_metadata(
+    //                 &specific.name,
+    //                 specific.version.to_string().as_deref(),
+    //                 &[origin],
+    //                 false,
+    //             )) else {
+    //                 return Err(Ordering::Equal);
+    //             };
+    //             metadata.version
+    //         }
+    //         Self::Latest(latest) => {
+    //             let Some(metadata) = runtime.block_on(ProcessedMetaData::get_metadata(
+    //                 latest,
+    //                 None,
+    //                 &[origin],
+    //                 false,
+    //             )) else {
+    //                 return Err(Ordering::Equal);
+    //             };
+    //             metadata.version
+    //         }
+    //     };
+    //     let theirs_requested = Version::parse(&theirs_requested).unwrap_or_default();
+    //     if installed.major == 0 {
+    //         match installed.minor.cmp(&theirs_requested.minor) {
+    //             Ordering::Equal => match installed.patch.cmp(&theirs_requested.patch) {
+    //                 Ordering::Greater => Err(Ordering::Greater),
+    //                 Ordering::Equal => Ok(installed.pre.cmp(&theirs_requested.pre)),
+    //                 Ordering::Less => Ok(Ordering::Less),
+    //             },
+    //             order => Err(order),
+    //         }
+    //     } else {
+    //         match installed.major.cmp(&theirs_requested.major) {
+    //             Ordering::Equal => match installed.minor.cmp(&theirs_requested.minor) {
+    //                 Ordering::Greater => Err(Ordering::Greater),
+    //                 Ordering::Equal => match installed.patch.cmp(&theirs_requested.patch) {
+    //                     Ordering::Equal => Ok(installed.pre.cmp(&theirs_requested.pre)),
+    //                     order => Ok(order),
+    //                 },
+    //                 Ordering::Less => Ok(Ordering::Less),
+    //             },
+    //             order => Err(order),
+    //         }
+    //     }
+    // }
 }
 
 #[derive(PartialEq, Eq, Serialize, Deserialize, Debug, Hash, Clone)]
 pub struct Specific {
     pub name: String,
-    pub version: String,
+    pub version: VerReq,
 }
 
 impl Specific {
@@ -546,10 +576,13 @@ impl Specific {
             && path.is_file()
             && let Some(mut data) = data
         {
-            if data.version == self.version {
+            let Some(version) = self.version.to_string() else {
+                return err!("Failed to get version of `{}`!", self.name);
+            };
+            if data.version == version {
                 let their_dep = Self {
                     name: their_name.to_string(),
-                    version: their_ver.to_string(),
+                    version: VerReq::Eq(Version::parse(their_ver)?),
                 };
                 if !data.dependents.contains(&their_dep) {
                     data.dependents.push(their_dep);
@@ -586,7 +619,10 @@ impl Specific {
     }
     pub fn get_dependents(&self, queued: &mut QueuedChanges) -> Result<(), String> {
         let data = InstalledMetaData::open(&self.name)?;
-        if data.version == self.version {
+        let Some(version) = self.version.to_string() else {
+            return err!("Failed to get version of `{}`!", self.name);
+        };
+        if data.version == version {
             for dependent in &data.dependents {
                 if queued.insert_primary(dependent.clone()) {
                     dependent.get_dependents(queued)?;
@@ -594,12 +630,25 @@ impl Specific {
             }
             Ok(())
         } else {
-            err!("`{}` didn't contain version {}!", self.name, self.version)
+            err!(
+                "`{}` didn't contain version {}!",
+                self.name,
+                self.version
+                    .to_string()
+                    .unwrap_or(String::from("MISSING VER"))
+            )
         }
     }
     pub fn remove_version(&self, purge: bool) -> Result<(), String> {
         let msg = if purge { "Purging" } else { "Removing" };
-        println!("{} {} version {}...", msg, self.name, self.version);
+        println!(
+            "{} {} version {}...",
+            msg,
+            self.name,
+            self.version
+                .to_string()
+                .unwrap_or(String::from("MISSING VER"))
+        );
         let (path, data) = get_metadata_path(&self.name)?;
         let data = if let Some(data) = data {
             data
@@ -655,13 +704,15 @@ impl InstalledMetaData {
         })
     }
     pub fn write(self, path: &Path) -> Result<Option<Self>, String> {
-        if self.dependents.is_empty() {
-            if fs::remove_file(path).is_err() {
-                err!("Failed to remove {}!", &self.name)
-            } else {
-                Ok(None)
-            }
-        } else if !path.exists() || path.is_file() {
+        // if self.dependents.is_empty() && self.dependent {
+        //     if fs::exists(path).is_ok_and(|x| x) && fs::remove_file(path).is_err() {
+        //         err!("Failed to remove `{}`!", &self.name)
+        //     } else {
+        //         println!("a");
+        //         Ok(None)
+        //     }
+        // } else
+        if !path.exists() || path.is_file() {
             let data = match serde_norway::to_string(&self) {
                 Ok(data) => data,
                 Err(_) => {
@@ -741,7 +792,7 @@ struct RawPax {
     description: String,
     version: String,
     origin: String,
-    dependencies: Vec<String>,
+    build_dependencies: Vec<String>,
     runtime_dependencies: Vec<String>,
     build: String,
     install: String,
@@ -776,15 +827,15 @@ impl RawPax {
         } else {
             OriginKind::Pax(self.origin.clone())
         };
-        let dependencies = {
+        let build_dependencies = {
             let mut deps = Vec::new();
-            for dep in &self.dependencies {
+            for dep in &self.build_dependencies {
                 let val = if let Some(dep) = dep.strip_prefix('!') {
                     DependKind::Volatile(dep.to_string())
                 } else if let Some((name, ver)) = dep.split_once(':') {
                     DependKind::Specific(Specific {
                         name: name.to_string(),
-                        version: ver.to_string(),
+                        version: RawPax::parse_ver(ver)?,
                     })
                 } else {
                     DependKind::Latest(dep.to_string())
@@ -801,7 +852,7 @@ impl RawPax {
                 } else if let Some((name, ver)) = dep.split_once(':') {
                     DependKind::Specific(Specific {
                         name: name.to_string(),
-                        version: ver.to_string(),
+                        version: RawPax::parse_ver(ver)?,
                     })
                 } else {
                     DependKind::Latest(dep.to_string())
@@ -817,7 +868,7 @@ impl RawPax {
             version: self.version,
             origin,
             dependent,
-            dependencies,
+            build_dependencies,
             runtime_dependencies,
             install_kind: ProcessedInstallKind::Compilable(ProcessedCompilable {
                 build: self.build,
@@ -827,6 +878,21 @@ impl RawPax {
             }),
             hash: self.hash,
         })
+    }
+    fn parse_ver(ver: &str) -> Option<VerReq> {
+        if let Some(ver) = ver.strip_prefix(">>") {
+            Some(VerReq::Gt(Version::parse(ver).ok()?))
+        } else if let Some(ver) = ver.strip_prefix(">=") {
+            Some(VerReq::Ge(Version::parse(ver).ok()?))
+        } else if let Some(ver) = ver.strip_prefix("==") {
+            Some(VerReq::Eq(Version::parse(ver).ok()?))
+        } else if let Some(ver) = ver.strip_prefix("<=") {
+            Some(VerReq::Le(Version::parse(ver).ok()?))
+        } else if let Some(ver) = ver.strip_prefix("<<") {
+            Some(VerReq::Lt(Version::parse(ver).ok()?))
+        } else {
+            Some(VerReq::Eq(Version::parse(ver).ok()?))
+        }
     }
 }
 
@@ -851,6 +917,20 @@ fn get_metadata_path(name: &str) -> Result<(PathBuf, Option<InstalledMetaData>),
         }
     } else {
         err!("`{name}`'s metadata file is of unexpected type!")
+    }
+}
+
+async fn get_latest(name: &str) -> Result<String, String> {
+    let sources = SettingsYaml::get_settings()?.sources;
+    let metadata = match ProcessedMetaData::get_metadata(name, None, &sources, true).await {
+        Some(data) => data,
+        None => return err!("Failed to parse package `{name}`'s metadata!"),
+    };
+    let splits = metadata.version.split('.').collect::<Vec<&str>>();
+    if splits.len() == 3 {
+        Ok(format!("{}.{}", splits[0], splits[1]))
+    } else {
+        err!("Version for package {name} was malformed!")
     }
 }
 
@@ -898,6 +978,82 @@ impl Default for QueuedChanges {
         Self::new()
     }
 }
+/* #region Install */
+
+#[derive(Debug)]
+pub struct InstallPackage {
+    pub metadata: ProcessedMetaData,
+    pub build_deps: Vec<InstallPackage>,
+    pub run_deps: Vec<InstallPackage>,
+}
+
+impl InstallPackage {
+    pub fn list_deps(&self) -> HashSet<String> {
+        let mut data = HashSet::new();
+        data.insert(self.metadata.name.to_string());
+        for dep in &self.run_deps {
+            data.extend(dep.list_deps());
+        }
+        data
+    }
+    pub fn install(self, sources: &[OriginKind], runtime: &Runtime) -> Result<(), String> {
+        for dep in self.build_deps {
+            dep.install(sources, runtime)?;
+        }
+        for dep in self.run_deps {
+            dep.install(sources, runtime)?
+        }
+        self.metadata.install_package(sources, runtime)?;
+        Ok(())
+    }
+}
+
+pub async fn get_packages(
+    args: &[(&String, Option<&String>)],
+) -> Result<Vec<InstallPackage>, String> {
+    print!("\x1B[2K\rBuilding dependency tree... 0%");
+    let settings = SettingsYaml::get_settings()?;
+    let mut children = Vec::new();
+    let mut seen = HashSet::new();
+    let count = args.len();
+    for (i, package) in args.iter().enumerate() {
+        if let Some(data) = get_package(&settings.sources, package, false, &mut seen).await? {
+            children.push(data);
+        }
+        print!("\rBuilding dependency tree... {}%", i * 100 / count);
+        let _ = std::io::stdout().flush();
+    }
+    print!("\rBuilding dependency tree... Done!");
+    Ok(children)
+}
+
+async fn get_package(
+    sources: &[OriginKind],
+    dep: &(&String, Option<&String>),
+    dependent: bool,
+    prior: &mut HashSet<Specific>,
+) -> Result<Option<InstallPackage>, String> {
+    let (app, version) = dep;
+    let metadata =
+        match ProcessedMetaData::get_metadata(app, version.map(|x| x.as_str()), sources, dependent)
+            .await
+        {
+            Some(data) => data,
+            None => return err!("Failed to parse package `{app}`'s metadata!"),
+        };
+    if let Ok(installed) = InstalledMetaData::open(&metadata.name)
+        && installed.version == metadata.version
+    {
+        return Ok(None);
+    };
+    // else {handle conflicts!!!}
+    match ProcessedMetaData::get_depends(&metadata, sources, prior).await {
+        Ok(data) => Ok(Some(data)),
+        Err(fault) => err!("{fault}"),
+    }
+}
+
+/* #endregion Install */
 /* #region Remove/Purge */
 pub async fn get_local_deps(args: &[(&String, Option<&String>)]) -> Result<QueuedChanges, String> {
     print!("\x1B[2K\rCollecting dependencies... 0%");
@@ -938,7 +1094,7 @@ async fn get_local_dep(
                 prior.insert(dependency.clone());
             }
             let items = Box::pin(get_local_dep(
-                &(&dependency.name, Some(&dependency.version)),
+                &(&dependency.name, dependency.version.to_string().as_ref()),
                 prior,
                 false,
             ))
@@ -949,7 +1105,7 @@ async fn get_local_dep(
         if root {
             result.insert_primary(Specific {
                 name: version.name.to_string(),
-                version: version.version.to_string(),
+                version: VerReq::Eq(Version::parse(&version.version)?),
             });
         }
     }
@@ -1021,8 +1177,7 @@ async fn collect_update(
     if metadata.dependents.is_empty()
         && !metadata.dependent
         && let Some(data) = ProcessedMetaData::get_metadata(&name, None, sources, true).await
-        && Version::parse(&data.version).unwrap_or(Version::new(0, 0, 0))
-            > Version::parse(&metadata.version).unwrap_or(Version::new(0, 0, 0))
+        && Version::parse(&data.version)? > Version::parse(&metadata.version)?
     {
         result.push(data);
     }
@@ -1030,42 +1185,6 @@ async fn collect_update(
     Ok(result)
 }
 /* #endregion Update */
-/* #region Emancipate */
-pub fn emancipate(data: &[(&String, Option<&String>)]) -> Result<(), String> {
-    for bit in data {
-        let (dep, ver) = *bit;
-        let (path, data) = get_metadata_path(dep)?;
-        let mut data = if let Some(data) = data {
-            data
-        } else {
-            return err!("Cannot find data for package `{dep}`!");
-        };
-        if let Some(ver) = ver {
-            println!("Emancipating `{dep}` version {ver}...",);
-            if data.version == *ver {
-                if !data.dependent {
-                    println!(
-                        "\x1B[33m[WARN] `{dep}` version {ver} is already independent!\x1B[0m..."
-                    );
-                    continue;
-                }
-                data.dependent = false;
-            }
-        } else {
-            println!("Emancipating `{dep}`...",);
-            if data.dependent {
-                data.dependent = false;
-            } else {
-                println!(
-                    "\x1B[33m[WARN] All versions of `{dep}` are already independent!\x1B[0m...",
-                );
-            }
-        };
-        data.write(&path)?;
-    }
-    Ok(())
-}
-/* #endregion Emancipate */
 /* #region Upgrade */
 pub fn upgrade_all() -> Result<Vec<ProcessedMetaData>, String> {
     let path = get_update_dir()?;
@@ -1136,75 +1255,39 @@ pub fn upgrade_packages(packages: &[ProcessedMetaData]) -> Result<(), String> {
 }
 
 /* #endregion Upgrade */
-/* #region Install */
-
-#[derive(Debug)]
-pub struct InstallPackage {
-    pub metadata: ProcessedMetaData,
-    pub dependencies: Vec<InstallPackage>,
-}
-
-impl InstallPackage {
-    pub fn list_deps(&self) -> HashSet<String> {
-        let mut data = HashSet::new();
-        data.insert(self.metadata.name.to_string());
-        for dep in &self.dependencies {
-            data.extend(dep.list_deps());
-        }
-        data
-    }
-    pub fn install(self, sources: &[OriginKind], runtime: &Runtime) -> Result<(), String> {
-        for dep in self.dependencies {
-            dep.install(sources, runtime)?;
-        }
-        self.metadata.install_package(sources, runtime)?;
-        Ok(())
-    }
-}
-
-pub async fn get_packages(
-    args: &[(&String, Option<&String>)],
-) -> Result<Vec<InstallPackage>, String> {
-    print!("\x1B[2K\rBuilding dependency tree... 0%");
-    let settings = SettingsYaml::get_settings()?;
-    let mut children = Vec::new();
-    let mut seen = HashSet::new();
-    let count = args.len();
-    for (i, package) in args.iter().enumerate() {
-        if let Some(data) = get_package(&settings.sources, package, false, &mut seen).await? {
-            children.push(data);
-        }
-        print!("\rBuilding dependency tree... {}%", i * 100 / count);
-        let _ = std::io::stdout().flush();
-    }
-    print!("\rBuilding dependency tree... Done!");
-    Ok(children)
-}
-
-async fn get_package(
-    sources: &[OriginKind],
-    dep: &(&String, Option<&String>),
-    dependent: bool,
-    prior: &mut HashSet<Specific>,
-) -> Result<Option<InstallPackage>, String> {
-    let (app, version) = dep;
-    let metadata =
-        match ProcessedMetaData::get_metadata(app, version.map(|x| x.as_str()), sources, dependent)
-            .await
-        {
-            Some(data) => data,
-            None => return err!("Failed to parse package `{app}`'s metadata!"),
+/* #region Emancipate */
+pub fn emancipate(data: &[(&String, Option<&String>)]) -> Result<(), String> {
+    for bit in data {
+        let (dep, ver) = *bit;
+        let (path, data) = get_metadata_path(dep)?;
+        let mut data = if let Some(data) = data {
+            data
+        } else {
+            return err!("Cannot find data for package `{dep}`!");
         };
-    if let Ok(installed) = InstalledMetaData::open(&metadata.name)
-        && installed.version == metadata.version
-    {
-        return Ok(None);
-    };
-    // else {handle conflicts!!!}
-    match ProcessedMetaData::get_depends(&metadata, sources, prior).await {
-        Ok(data) => Ok(Some(data)),
-        Err(fault) => err!("{fault}"),
+        if let Some(ver) = ver {
+            println!("Emancipating `{dep}` version {ver}...",);
+            if data.version == *ver {
+                if !data.dependent {
+                    println!(
+                        "\x1B[33m[WARN] `{dep}` version {ver} is already independent!\x1B[0m..."
+                    );
+                    continue;
+                }
+                data.dependent = false;
+            }
+        } else {
+            println!("Emancipating `{dep}`...",);
+            if data.dependent {
+                data.dependent = false;
+            } else {
+                println!(
+                    "\x1B[33m[WARN] All versions of `{dep}` are already independent!\x1B[0m...",
+                );
+            }
+        };
+        data.write(&path)?;
     }
+    Ok(())
 }
-
-/* #endregion Install */
+/* #endregion Emancipate */

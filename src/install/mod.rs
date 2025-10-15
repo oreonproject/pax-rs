@@ -64,7 +64,7 @@ fn run(states: &StateBox, args: Option<&[String]>) -> PostAction {
             .fold(String::new(), |acc, x| format!("{acc} {}", x.metadata.name))
             .trim()
     );
-    if data.iter().any(|x| !x.dependencies.is_empty()) {
+    if data.iter().any(|x| !x.run_deps.is_empty()) {
         println!(
             "The following package(s) will be MODIFIED:  \x1B[93m{}\x1B[0m",
             data.iter()
