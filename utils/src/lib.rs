@@ -110,7 +110,7 @@ pub fn choice(message: &str, default_yes: bool) -> Result<bool, String> {
     }
 }
 
-#[derive(Debug, Default, Eq, Serialize, Deserialize, PartialEq, Clone, Hash)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct Version {
     pub major: usize,
     pub minor: usize,
@@ -124,7 +124,7 @@ impl Version {
         let (src, pre) = src
             .split_once('-')
             .map(|x| (x.0, x.1.to_string()))
-            .unwrap_or((src, String::new()));
+            .unwrap_or_else(|| (src, String::new()));
         let split = src.split('.').collect::<Vec<&str>>();
         if !split.is_empty() {
             if let Ok(major) = split[0].parse::<usize>() {
@@ -173,21 +173,6 @@ impl Version {
     }
 }
 
-impl PartialOrd for Version {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        match self.major.cmp(&other.major) {
-            Ordering::Equal => match self.minor.cmp(&other.minor) {
-                Ordering::Equal => match self.patch.cmp(&other.patch) {
-                    Ordering::Equal => Some(self.pre.cmp(&other.pre)),
-                    order => Some(order),
-                },
-                order => Some(order),
-            },
-            order => Some(order),
-        }
-    }
-}
-
 impl std::fmt::Display for Version {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.pre.is_empty() {
@@ -201,7 +186,28 @@ impl std::fmt::Display for Version {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Hash)]
+impl Ord for Version {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match self.major.cmp(&other.major) {
+            Ordering::Equal => match self.minor.cmp(&other.minor) {
+                Ordering::Equal => match self.patch.cmp(&other.patch) {
+                    Ordering::Equal => self.pre.cmp(&other.pre),
+                    order => order,
+                },
+                order => order,
+            },
+            order => order,
+        }
+    }
+}
+
+impl PartialOrd for Version {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub enum VerReq {
     Gt(Version),
     Ge(Version),
@@ -369,20 +375,20 @@ impl VerReq {
             None
         }
     }
-    pub fn to_string(&self) -> Option<String> {
-        match self {
-            Self::Gt(s) | Self::Ge(s) | Self::Eq(s) | Self::Le(s) | Self::Lt(s) => {
-                Some(s.to_string())
-            }
-            Self::NoBound => None,
-        }
-    }
+    // pub fn to_string(&self) -> Option<String> {
+    //     match self {
+    //         Self::Gt(s) | Self::Ge(s) | Self::Eq(s) | Self::Le(s) | Self::Lt(s) => {
+    //             Some(s.to_string())
+    //         }
+    //         Self::NoBound => None,
+    //     }
+    // }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct Range {
-    lower: VerReq,
-    upper: VerReq,
+    pub lower: VerReq,
+    pub upper: VerReq,
 }
 
 impl Range {

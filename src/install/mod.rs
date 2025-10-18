@@ -68,7 +68,7 @@ fn run(states: &StateBox, args: Option<&[String]>) -> PostAction {
         println!(
             "The following package(s) will be MODIFIED:  \x1B[93m{}\x1B[0m",
             data.iter()
-                .flat_map(|x| x.list_deps())
+                .flat_map(|x| x.list_deps(true))
                 .fold(String::new(), |acc, x| format!("{acc} {x}"))
                 .trim()
         );
