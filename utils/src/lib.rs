@@ -364,7 +364,7 @@ impl VerReq {
                     }
                     _ => None,
                 },
-                Self::NoBound => None,
+                Self::NoBound => Some(prior),
             }
         } else {
             None
@@ -415,5 +415,8 @@ impl Range {
             VerReq::NoBound => true,
             _ => false,
         }
+    }
+    pub fn negotiate(&self, prior: Option<Self>) -> Option<Self> {
+        self.upper.negotiate(self.lower.negotiate(prior))
     }
 }
