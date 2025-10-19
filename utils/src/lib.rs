@@ -375,14 +375,6 @@ impl VerReq {
             None
         }
     }
-    // pub fn to_string(&self) -> Option<String> {
-    //     match self {
-    //         Self::Gt(s) | Self::Ge(s) | Self::Eq(s) | Self::Le(s) | Self::Lt(s) => {
-    //             Some(s.to_string())
-    //         }
-    //         Self::NoBound => None,
-    //     }
-    // }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]

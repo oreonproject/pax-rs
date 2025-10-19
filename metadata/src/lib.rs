@@ -76,7 +76,7 @@ impl ProcessedMetaData {
             hash: self.hash.to_string(),
         }
     }
-    pub fn install_package(self, _sources: &[OriginKind]) -> Result<Option<PathBuf>, String> {
+    pub async fn install_package(self) -> Result<(), String> {
         let name = self.name.to_string();
         println!("Installing {name}...");
         let (path, _) = get_metadata_path(&name)?;
@@ -90,17 +90,60 @@ impl ProcessedMetaData {
                 version: Version::parse(&their_metadata.version)?,
             }
         }
-        // Run install thingy
+        let tmpfile = match tmpfile() {
+            Some(file) => file,
+            None => return err!("Failed to reserve a file for {name}!"),
+        };
+        if let Ok(mut file) = File::create(&tmpfile) {
+            let endpoint = match self.origin {
+                OriginKind::Pax(pax) => format!("{pax}?v={}", self.version),
+                OriginKind::Github {
+                    user: _,
+                    repo: _,
+                    commit: _,
+                } => {
+                    return err!("Github is not implemented yet!"); // thingy
+                }
+            };
+            if let Ok(response) = reqwest::get(endpoint).await {
+                if let Ok(body) = response.text().await {
+                    let Ok(()) = file.write_all(body.as_bytes()) else {
+                        return err!("Failed to write downloaded PAX file to TMP file!");
+                    };
+                } else {
+                    return err!("Failed to download PAX file data!");
+                }
+            } else {
+                return err!("Failed to ");
+            }
+        } else {
+            return err!("Failed to open temporary file {}!", tmpfile.display());
+        }
+        match self.install_kind {
+            ProcessedInstallKind::PreBuilt(_) => {
+                return err!("PreBuilt is not implemented yet!"); //thingy
+            }
+            ProcessedInstallKind::Compilable(compilable) => {
+                let build = compilable.build.replace("{$~}", &tmpfile.to_string_lossy());
+                let mut command = RunCommand::new("/usr/bin/bash");
+                if command.arg("-c").arg(build).status().is_err() {
+                    return err!("Failed to build package `{}`!", self.name);
+                }
+                let install = compilable
+                    .install
+                    .replace("{$~}", &tmpfile.to_string_lossy());
+                let mut command = RunCommand::new("/usr/bin/bash");
+                if command.arg("-c").arg(install).status().is_err() {
+                    return err!("Failed to install package `{}`!", self.name);
+                }
+            }
+        }
         metadata.write(&path)?;
         for dep in deps {
             let dep = dep.get_installed_specific()?;
             dep.write_dependent(&name, &ver)?;
         }
-        let tmpfile = match tmpfile() {
-            Some(file) => file,
-            None => return err!("Failed to reserve a file for {name}!"),
-        };
-        Ok(Some(tmpfile))
+        Ok(())
     }
     pub fn write(self, base: &Path, inc: &mut usize) -> Result<Self, String> {
         let path = loop {
@@ -269,7 +312,7 @@ impl ProcessedMetaData {
             .collect::<Result<Vec<ProcessedMetaData>, String>>()?;
         children
             .into_iter()
-            .try_for_each(|x| match x.install_package(sources) {
+            .try_for_each(|x| match runtime.block_on(x.install_package()) {
                 Ok(_path) => Ok(()),
                 Err(fault) => Err(fault),
             })?;
@@ -281,7 +324,7 @@ impl ProcessedMetaData {
                 let installed_metadata = InstalledMetaData::open(&dep_ver.name)?;
                 let metadata = runtime
                     .block_on(dep_ver.pull_metadata(Some(sources), installed_metadata.dependent))?;
-                metadata.install_package(sources)?;
+                runtime.block_on(metadata.install_package())?;
             }
         }
         for package in in_place_upgrade {
@@ -294,7 +337,7 @@ impl ProcessedMetaData {
                 let metadata = runtime
                     .block_on(dep_ver.pull_metadata(Some(sources), old_metadata.dependent))?;
                 if metadata.version != old_metadata.version {
-                    metadata.install_package(sources)?;
+                    runtime.block_on(metadata.install_package())?;
                 }
                 let mut metadata = InstalledMetaData::open(&name)?;
                 if let Some(found) = metadata.dependents.iter_mut().find(|x| x.name == self.name) {
@@ -305,7 +348,7 @@ impl ProcessedMetaData {
                 metadata.write(&path)?;
             }
         }
-        self.clone().install_package(sources)?;
+        runtime.block_on(self.clone().install_package())?;
         Ok(())
     }
     pub fn as_specific(&self) -> Result<Specific, String> {
@@ -630,9 +673,7 @@ impl Specific {
         let msg = if purge { "Purging" } else { "Removing" };
         println!("{} {} version {}...", msg, self.name, self.version);
         let (path, data) = get_metadata_path(&self.name)?;
-        let data = if let Some(data) = data {
-            data
-        } else {
+        let Some(data) = data else {
             // Since packages are interlinked, chances are another package
             // has already removed this one, and therefore we are just holding
             // a stale package `Specific`!
@@ -655,7 +696,24 @@ impl Specific {
             data.clear_dependencies(dep)?;
             dep.remove(purge)?;
         }
-        // Run uninstall/purge thingy...
+        match data.install_kind {
+            InstalledInstallKind::PreBuilt(_) => {
+                return err!("PreBuilt is not implemented yet!"); //thingy
+            }
+            InstalledInstallKind::Compilable(compilable) => {
+                // I'm not sure if the `purge` script is run IN PLACE OF, or
+                // AFTER the `uninstall` script. This is due to change.
+                let (script, msg) = if purge {
+                    (compilable.purge, "purge")
+                } else {
+                    (compilable.uninstall, "remove")
+                };
+                let mut command = RunCommand::new("/usr/bin/bash");
+                if command.arg("-c").arg(script).status().is_err() {
+                    return err!("Failed to {msg} package `{}`!", self.name);
+                }
+            }
+        }
         match fs::remove_file(path) {
             Ok(()) => Ok(()),
             Err(_) => err!("Failed to remove `{}`!", &self.name),
@@ -729,28 +787,24 @@ impl InstalledMetaData {
             Ok(None)
         }
     }
-    // This feels a _little_ bit hacky, so I will probably remove it.
     pub fn clear_dependencies(&self, specific: &Specific) -> Result<(), String> {
-        let path = get_metadata_dir()?;
-        for dependency in &self.dependencies {
-            let mut data = self.clone();
-            let Some(index) = data
-                .dependencies
-                .iter()
-                .position(|x| x.get_installed_specific().is_ok_and(|x| x == *specific))
-            else {
-                return err!(
-                    "`{}` {} didn't contain dependent `{}`!",
-                    data.name,
-                    data.version,
-                    specific.name
-                );
-            };
-            data.dependencies.remove(index);
-            let mut path = path.clone();
-            path.push(format!("{}.yaml", dependency.name));
-            data.write(&path)?;
-        }
+        let mut path = get_metadata_dir()?;
+        let mut data = self.clone();
+        let Some(index) = &data
+            .dependencies
+            .iter()
+            .position(|x| x.get_installed_specific().is_ok_and(|x| x == *specific))
+        else {
+            return err!(
+                "`{}` {} didn't contain dependent `{}`!",
+                data.name.to_string(),
+                data.version.to_string(),
+                specific.name
+            );
+        };
+        data.dependencies.remove(*index);
+        path.push(format!("{}.yaml", self.name));
+        data.write(&path)?;
         Ok(())
     }
 }
@@ -961,7 +1015,7 @@ impl InstallPackage {
         }
         data
     }
-    pub fn install(self, sources: &[OriginKind]) -> Result<(), String> {
+    pub fn install(self, runtime: &Runtime) -> Result<(), String> {
         let mut collected: Vec<ProcessedMetaData> = self.collect()?;
         let depends = collected
             .iter()
@@ -1026,7 +1080,7 @@ impl InstallPackage {
             }
         }
         for metadata in filtered {
-            metadata.install_package(sources)?;
+            runtime.block_on(metadata.install_package())?;
         }
         Ok(())
     }

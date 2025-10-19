@@ -13,15 +13,49 @@ use utils::{PostAction, err, get_dir, is_root};
 pub struct SettingsYaml {
     pub locked: bool,
     pub version: String,
+    pub arch: Arch,
     pub exec: Option<String>,
     pub sources: Vec<OriginKind>,
 }
 
 impl SettingsYaml {
     pub fn new() -> Self {
+        let mut command = std::process::Command::new("/usr/bin/uname");
+        let arch = if let Ok(output) = command.arg("-m").output() {
+            match String::from_utf8_lossy(&output.stdout)
+                .to_string()
+                .as_str()
+                .trim()
+            {
+                "x86_64" => {
+                    let mut command = std::process::Command::new("/usr/bin/bash");
+                    command.arg("-c").arg("(lscpu|grep -q avx512f&&echo 4&&exit||lscpu|grep -q avx2&&echo 3&&exit||lscpu|grep -q sse4_2&&echo 2&&exit||echo 1)");
+                    if let Ok(output) = command.output() {
+                        match String::from_utf8_lossy(&output.stdout)
+                            .to_string()
+                            .as_str()
+                            .trim()
+                        {
+                            "4" | "3" => Arch::X86_64v3,
+                            "2" | "1" => Arch::X86_64v1,
+                            _ => Arch::NoArch,
+                        }
+                    } else {
+                        Arch::NoArch
+                    }
+                }
+                "aarch64" => Arch::Aarch64,
+                "armv7l" => Arch::Armv7l,
+                "armv8l" => Arch::Armv8l,
+                _ => Arch::NoArch,
+            }
+        } else {
+            Arch::NoArch
+        };
         Self {
             locked: false,
             version: env!("SETTINGS_YAML_VERSION").to_string(),
+            arch,
             exec: None,
             sources: Vec::new(),
         }
@@ -65,6 +99,16 @@ pub enum OriginKind {
         repo: String,
         commit: String,
     },
+}
+
+#[derive(PartialEq, Serialize, Deserialize, Debug)]
+pub enum Arch {
+    NoArch,
+    X86_64v1,
+    X86_64v3,
+    Aarch64,
+    Armv7l,
+    Armv8l,
 }
 
 impl Default for SettingsYaml {

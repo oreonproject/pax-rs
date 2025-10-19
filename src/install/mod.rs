@@ -81,7 +81,7 @@ fn run(states: &StateBox, args: Option<&[String]>) -> PostAction {
         }
     }
     for data in data {
-        if let Err(fault) = data.install(&sources) {
+        if let Err(fault) = data.install(&runtime) {
             return PostAction::Fuck(fault);
         }
     }
