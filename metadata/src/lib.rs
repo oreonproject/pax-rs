@@ -8,11 +8,13 @@ use std::{
 use tokio::runtime::Runtime;
 use utils::{Range, VerReq, Version, err, get_metadata_dir, get_update_dir};
 
-use crate::depend_kind::DependKind;
-use crate::installed::{InstalledInstallKind, InstalledMetaData};
-use crate::parsers::{MetaDataKind, pax};
-use crate::processed::ProcessedMetaData;
-use crate::versioning::{DepVer, Specific};
+use crate::{
+    depend_kind::DependKind,
+    installed::{InstalledInstallKind, InstalledMetaData},
+    parsers::{MetaDataKind, pax},
+    processed::ProcessedMetaData,
+    versioning::{DepVer, Specific},
+};
 
 pub mod depend_kind;
 pub mod installed;

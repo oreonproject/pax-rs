@@ -6,11 +6,3 @@ pub mod pax;
 pub enum MetaDataKind {
     Pax,
 }
-
-impl std::fmt::Display for MetaDataKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self {
-            MetaDataKind::Pax => write!(f, "pax"),
-        }
-    }
-}

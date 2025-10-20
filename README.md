@@ -4,6 +4,7 @@ Pax Package Manager (Rust)
 To make the structure of this repo better for readability, each subcommand will be placed in its own folder within the directory of its parent command - e.g. say there are commands `cmd1` and `cmd2`, with `cmd2` having commands `nested1` and `nested2`, the directory structure should look like so:
 ```
 .
+├── (other data i.e. commands, metadata, settings, etc.)
 ├── src
 │   ├── cmd1
 │   │   └── mod.rs
@@ -13,10 +14,6 @@ To make the structure of this repo better for readability, each subcommand will 
 │   │   ├── nested2
 │   │   │   └── mod.rs
 │   │   └── mod.rs
-│   ├── command.rs
-│   ├── flag.rs
-│   ├── main.rs
-│   └── statebox.rs
 ├── Cargo.lock
 └── Cargo.toml
 ```

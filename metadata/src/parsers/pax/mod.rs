@@ -8,7 +8,7 @@ use crate::{
     processed::{ProcessedCompilable, ProcessedInstallKind, ProcessedMetaData},
 };
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, Deserialize)]
 pub struct RawPax {
     name: String,
     description: String,
@@ -24,7 +24,7 @@ pub struct RawPax {
 }
 
 impl RawPax {
-    pub fn process(self, dependent: bool) -> Option<ProcessedMetaData> {
+    pub fn process(self) -> Option<ProcessedMetaData> {
         let origin = if self.origin.starts_with("gh/") {
             let split = self
                 .origin
@@ -32,11 +32,10 @@ impl RawPax {
                 .skip(1)
                 .map(|x| x.to_string())
                 .collect::<Vec<String>>();
-            if split.len() == 3 {
+            if split.len() == 2 {
                 OriginKind::Github {
                     user: split[0].clone(),
                     repo: split[1].clone(),
-                    commit: split[2].clone(),
                 }
             } else {
                 return None;
@@ -57,7 +56,7 @@ impl RawPax {
             description: self.description,
             version: self.version,
             origin,
-            dependent,
+            dependent: true,
             build_dependencies,
             runtime_dependencies,
             install_kind: ProcessedInstallKind::Compilable(ProcessedCompilable {

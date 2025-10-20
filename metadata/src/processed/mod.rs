@@ -13,9 +13,8 @@ use utils::{Version, err, get_update_dir, tmpfile};
 
 use crate::{
     DepVer, DependKind, InstallPackage, InstalledInstallKind, InstalledMetaData, MetaDataKind,
-    Specific, get_metadata_path,
+    Specific, get_metadata_path, installed::InstalledCompilable, pax::RawPax,
 };
-use crate::{installed::InstalledCompilable, pax::RawPax};
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub enum ProcessedInstallKind {
@@ -52,7 +51,6 @@ pub struct ProcessedMetaData {
 impl ProcessedMetaData {
     pub fn to_installed(&self) -> InstalledMetaData {
         InstalledMetaData {
-            locked: false,
             name: self.name.clone(),
             kind: self.kind.clone(),
             version: self.version.to_string(),
@@ -103,11 +101,7 @@ impl ProcessedMetaData {
         if let Ok(mut file) = File::create(&tmpfile) {
             let endpoint = match self.origin {
                 OriginKind::Pax(pax) => format!("{pax}?v={}", self.version),
-                OriginKind::Github {
-                    user: _,
-                    repo: _,
-                    commit: _,
-                } => {
+                OriginKind::Github { user: _, repo: _ } => {
                     return err!("Github is not implemented yet!"); // thingy
                 }
             };
@@ -209,7 +203,7 @@ impl ProcessedMetaData {
                         };
                         let body = reqwest::get(endpoint).await.ok()?.text().await.ok()?;
                         if let Ok(raw_pax) = serde_json::from_str::<RawPax>(&body)
-                            && let Some(processed) = raw_pax.process(dependent)
+                            && let Some(processed) = raw_pax.process()
                         {
                             Some(processed)
                         } else {
@@ -217,16 +211,14 @@ impl ProcessedMetaData {
                         }
                     };
                 }
-                OriginKind::Github {
-                    user: _,
-                    repo: _,
-                    commit: _,
-                } => {
+                OriginKind::Github { user: _, repo: _ } => {
                     // thingy
                     println!("Github is not implemented yet!");
                 }
             }
-            if metadata.is_some() {
+            if let Some(mut mut_metadata) = metadata {
+                mut_metadata.dependent = dependent;
+                metadata = Some(mut_metadata);
                 break;
             }
         }

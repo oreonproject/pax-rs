@@ -59,11 +59,7 @@ impl DepVer {
                         g_source = Some(source.clone());
                     }
                 }
-                OriginKind::Github {
-                    user: _,
-                    repo: _,
-                    commit: _,
-                } => {
+                OriginKind::Github { user: _, repo: _ } => {
                     // thingy
                     println!("Github is not implemented yet!");
                 }
@@ -200,10 +196,6 @@ impl Specific {
                 self.name
             );
             return Ok(());
-        };
-        let data = match data.lock(&path, &self.name)? {
-            Some(data) => data,
-            None => return Ok(()),
         };
         for dep in &data
             .dependencies

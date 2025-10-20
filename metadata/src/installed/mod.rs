@@ -12,7 +12,6 @@ use crate::{DepVer, MetaDataKind, Specific};
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct InstalledMetaData {
-    pub locked: bool,
     pub name: String,
     pub kind: MetaDataKind,
     pub version: String,
@@ -59,21 +58,6 @@ impl InstalledMetaData {
             }
         } else {
             err!("File is of unexpected type!")
-        }
-    }
-    pub fn lock(mut self, path: &Path, name: &str) -> Result<Option<Self>, String> {
-        self.locked = true;
-        if let Some(data) = self.write(path)? {
-            Ok(Some(data))
-        } else {
-            println!(
-                "\x1B[33m[WARN] Skipping `{}` as it has no dependencies.\x1B[0m",
-                name
-            );
-            println!(
-                "\x1B[91m=== THIS IS UNEXPECTED BEHAVIOR, AND USUALLY INDICATES BROKEN PACKAGES! ===\x1B[0m..."
-            );
-            Ok(None)
         }
     }
     pub fn clear_dependencies(&self, specific: &Specific) -> Result<(), String> {

@@ -94,11 +94,7 @@ impl SettingsYaml {
 #[derive(PartialEq, Eq, Deserialize, Serialize, Debug, Hash, Clone)]
 pub enum OriginKind {
     Pax(String),
-    Github {
-        user: String,
-        repo: String,
-        commit: String,
-    },
+    Github { user: String, repo: String },
 }
 
 #[derive(PartialEq, Serialize, Deserialize, Debug)]
