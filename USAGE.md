@@ -227,69 +227,6 @@ metadata:
   conflicts: []
 ```
 
-## Advanced Features
-
-### Package Holds
-
-```bash
-# Hold package from upgrades
-pax hold package-name
-
-# Hold specific version
-pax hold package-name --version 1.0.0
-
-# List held packages
-pax hold list
-
-# Remove hold
-pax hold remove package-name
-```
-
-### Rollback Support
-
-```bash
-# Create rollback point
-pax rollback create "Before installing new package"
-
-# List rollback points
-pax rollback list
-
-# Rollback to specific point
-pax rollback restore rollback_1234567890
-```
-
-### Package Verification
-
-```bash
-# Verify package integrity
-pax verify package-name
-
-# Verify all packages
-pax verify --all
-
-# Add trusted key
-pax verify add-key key-id public-key
-```
-
-### Service Management
-
-```bash
-# Enable service
-pax service enable service-name
-
-# Disable service
-pax service disable service-name
-
-# Start service
-pax service start service-name
-
-# Stop service
-pax service stop service-name
-
-# Restart service
-pax service restart service-name
-```
-
 ## Troubleshooting
 
 ### Common Issues
