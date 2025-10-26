@@ -1,3 +1,5 @@
+pub mod logging;
+
 use std::{cmp::Ordering, fs::DirBuilder, io::Write, path::PathBuf, process::Command};
 
 use flags::Flag;
@@ -67,6 +69,21 @@ pub fn yes_flag() -> Flag {
     )
 }
 
+pub fn from_flag() -> Flag {
+    Flag::new(
+        Some('f'),
+        "from",
+        "Specify which repository to install from (e.g., 'pax', 'apt', 'rpm', 'r2://bucket.account_id')",
+        true,
+        false,
+        |states, value| {
+            if let Some(repo) = value {
+                states.shove("from_repo", repo);
+            }
+        },
+    )
+}
+
 pub fn specific_flag() -> Flag {
     Flag::new(
         Some('s'),
@@ -80,7 +97,21 @@ pub fn specific_flag() -> Flag {
     )
 }
 
+pub fn allow_overwrite_flag() -> Flag {
+    Flag::new(
+        Some('a'),
+        "allowerasing",
+        "Allows overwriting of files and symlinks during installation.",
+        false,
+        false,
+        |states, _| {
+            states.shove("allow_overwrite", true);
+        },
+    )
+}
+
 // I learned this basic macro from Kernel dev
+// TODO: maybe we should use a proper error handling crate instead?
 #[macro_export]
 macro_rules! err {
     ($fmt:literal $(, $args:expr)*) => {Err(format!($fmt $(, $args)*))};
@@ -133,7 +164,7 @@ impl Version {
                         if split.len() >= 3 {
                             if let Ok(patch) = split[2].parse::<usize>() {
                                 if split.len() > 3 {
-                                    err!("Two many segments in version!")
+                                    err!("Too many segments in version!") // TODO: maybe support more segments?
                                 } else {
                                     Ok(Self {
                                         major,
@@ -218,6 +249,25 @@ pub enum VerReq {
 }
 
 impl VerReq {
+    pub fn as_version(&self) -> Option<Version> {
+        match self {
+            VerReq::Gt(version) | VerReq::Ge(version) | VerReq::Eq(version) | 
+            VerReq::Le(version) | VerReq::Lt(version) => Some(version.clone()),
+            VerReq::NoBound => None,
+        }
+    }
+
+    pub fn satisfies(&self, version: &Version) -> bool {
+        match self {
+            VerReq::NoBound => true,
+            VerReq::Eq(req_version) => version == req_version,
+            VerReq::Gt(req_version) => version > req_version,
+            VerReq::Ge(req_version) => version >= req_version,
+            VerReq::Lt(req_version) => version < req_version,
+            VerReq::Le(req_version) => version <= req_version,
+        }
+    }
+
     pub fn negotiate(&self, prior: Option<Range>) -> Option<Range> {
         let prior = if let Some(mut prior) = prior {
             match self {
@@ -384,6 +434,15 @@ pub struct Range {
 }
 
 impl Range {
+    pub fn contains(&self, version: &Version) -> bool {
+        match (&self.lower, &self.upper) {
+            (VerReq::NoBound, VerReq::NoBound) => true,
+            (lower, VerReq::NoBound) => lower.satisfies(version),
+            (VerReq::NoBound, upper) => upper.satisfies(version),
+            (lower, upper) => lower.satisfies(version) && upper.satisfies(version),
+        }
+    }
+
     pub fn is_sane(&self) -> bool {
         match &self.lower {
             VerReq::Gt(gt) => match &self.upper {
@@ -410,5 +469,118 @@ impl Range {
     }
     pub fn negotiate(&self, prior: Option<Self>) -> Option<Self> {
         self.upper.negotiate(self.lower.negotiate(prior))
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub struct DepVer {
+    pub name: String,
+    pub range: Range,
+}
+
+impl std::fmt::Display for DepVer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name)
+    }
+}
+
+impl DepVer {
+    pub fn get_installed_specific(&self) -> Result<Specific, String> {
+        let installed_dir = get_metadata_dir()?;
+        let package_file = installed_dir.join(format!("{}.json", self.name));
+        
+        if package_file.exists() {
+            let content = std::fs::read_to_string(&package_file)
+                .map_err(|e| format!("Failed to read package file: {}", e))?;
+            let data: serde_json::Value = serde_json::from_str(&content)
+                .map_err(|e| format!("Failed to parse package metadata: {}", e))?;
+            
+            let name = data.get("name")
+                .and_then(|n| n.as_str())
+                .ok_or_else(|| format!("Missing name field"))?;
+            let version_str = data.get("version")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("Missing version field"))?;
+            
+            Ok(Specific {
+                name: name.to_string(),
+                version: Version::parse(version_str)?,
+            })
+        } else {
+            Err(format!("Package {} not found", self.name))
+        }
+    }
+
+    pub async fn pull_metadata(&self, _sources: Option<&[String]>, _dependent: bool) -> Result<Specific, String> {
+        // TODO: Implement proper metadata pulling from sources
+        self.get_installed_specific()
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub struct Specific {
+    pub name: String,
+    pub version: Version,
+}
+
+impl std::fmt::Display for Specific {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name)
+    }
+}
+
+impl Specific {
+    pub fn write_dependent(&self, their_name: &str, their_ver: &str) -> Result<(), String> {
+        let installed_dir = get_metadata_dir()?;
+        let package_file = installed_dir.join(format!("{}.json", self.name));
+        let path = package_file;
+        if path.exists() && path.is_file() {
+            let content = std::fs::read_to_string(&path)
+                .map_err(|e| format!("Failed to read package file: {}", e))?;
+            let mut data: serde_json::Value = serde_json::from_str(&content)
+                .map_err(|e| format!("Failed to parse package metadata: {}", e))?;
+            
+            // Add dependent to the dependents array
+            if let Some(dependents) = data.get_mut("dependents") {
+                if let Some(dependents_array) = dependents.as_array_mut() {
+                    let their_dep = serde_json::json!({
+                        "name": their_name,
+                        "version": their_ver
+                    });
+                    if !dependents_array.contains(&their_dep) {
+                        dependents_array.push(their_dep);
+                    }
+                }
+            }
+            
+            let content = serde_json::to_string_pretty(&data)
+                .map_err(|e| format!("Failed to serialize package metadata: {}", e))?;
+            let mut file = std::fs::File::create(&path)
+                .map_err(|e| format!("Failed to create package file: {}", e))?;
+            use std::io::Write;
+            file.write_all(content.as_bytes())
+                .map_err(|e| format!("Failed to write package file: {}", e))?;
+        }
+        Ok(())
+    }
+
+    pub fn get_dependents(&self, _queued: &mut Vec<String>) -> Result<(), String> {
+        // TODO: Implement proper dependency resolution
+        Ok(())
+    }
+
+    pub fn remove(&self, _purge: bool) -> Result<(), String> {
+        let installed_dir = get_metadata_dir()?;
+        let package_file = installed_dir.join(format!("{}.json", self.name));
+        let path = package_file;
+        
+        if _purge {
+            // TODO: Implement file removal logic
+        }
+        
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(_) => Err(format!("Failed to remove `{}`!", &self.name)),
+        }
     }
 }

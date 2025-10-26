@@ -109,7 +109,8 @@ impl StateBox {
         }
     }
     pub fn push<T: 'static>(&mut self, _key: &str, _value: T) -> ! {
-        //Learned the '!' (bang) return type from RUst Kernel dev ;P
+        //Learned the '!' (bang) return type from Rust Kernel dev ;P
+        // TODO: implement this properly, it's not really needed right now
         unimplemented!()
     }
     /// Removes and returns the value associated with the specified key.

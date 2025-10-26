@@ -2,9 +2,13 @@ use std::{env, path::Path};
 
 pub mod configure;
 pub mod emancipate;
+pub mod info;
 pub mod install;
+pub mod list;
 pub mod pax_init;
 pub mod remove;
+pub mod repo;
+pub mod search;
 pub mod update;
 pub mod upgrade;
 
@@ -21,15 +25,19 @@ pub fn main() {
     let main_command = commands::Command::new(
         name,
         Vec::new(),
-        "PAX is the official package manager for Oreon 11.",
+        "PAX is the official package manager for Oreon.",
         vec![],
         Some(vec![
             configure::build,
             emancipate::build,
+            info::build,
             install::build,
+            list::build,
             pax_init::build,
             remove::build_purge,
             remove::build_remove,
+            repo::build,
+            search::build,
             update::build,
             upgrade::build,
         ]),

@@ -4,11 +4,21 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+flate2 = "1.0"
 nix.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_norway.workspace = true
+sha2 = "0.10"
 settings.workspace = true
 tokio.workspace = true
+urlencoding.workspace = true
 utils.workspace = true
+futures = "0.3"
+tempfile = "3.8"
+serde_yaml = "0.9"
+quick-xml.workspace = true
+
+[dev-dependencies]
+tokio-test = "0.4"

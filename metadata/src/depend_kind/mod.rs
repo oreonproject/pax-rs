@@ -68,7 +68,7 @@ impl DependKind {
                     }
                 }
                 Self::Specific(dep_ver) => {
-                    let specific = dep_ver.clone().pull_metadata(Some(sources), true).await?;
+                    let specific = dep_ver.clone().pull_metadata(Some(&sources.iter().map(|s| format!("{:?}", s)).collect::<Vec<_>>()), true).await?;
                     if let Some(data) = ProcessedMetaData::get_metadata(
                         &specific.name,
                         Some(&specific.version.to_string()),

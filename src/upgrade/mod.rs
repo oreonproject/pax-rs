@@ -3,6 +3,7 @@ use metadata::{upgrade_all, upgrade_only, upgrade_packages};
 use settings::acquire_lock;
 use statebox::StateBox;
 use utils::{PostAction, choice};
+use tokio::runtime::Runtime;
 
 pub fn build(hierarchy: &[String]) -> Command {
     Command::new(
@@ -39,10 +40,14 @@ fn run(states: &StateBox, args: Option<&[String]>) -> PostAction {
     } else {
         Vec::new()
     };
+    let Ok(runtime) = Runtime::new() else {
+        return PostAction::Fuck(String::from("Error creating runtime!"));
+    };
     let data = match if args.is_empty() {
-        upgrade_all()
+        runtime.block_on(upgrade_all())
     } else {
-        upgrade_only(&args)
+        let package_names: Vec<String> = args.iter().map(|(name, _)| (*name).clone()).collect();
+        runtime.block_on(upgrade_only(package_names))
     } {
         Ok(data) => data,
         Err(fault) => return PostAction::Fuck(fault),
@@ -52,9 +57,7 @@ fn run(states: &StateBox, args: Option<&[String]>) -> PostAction {
     }
     println!(
         "The following package(s) will be UPGRADED: \x1B[94m{}\x1B[0m",
-        data.iter()
-            .fold(String::new(), |acc, x| format!("{acc} {}", x.name))
-            .trim()
+        data.join(" ")
     );
     if states.get("yes").is_none_or(|x: &bool| !*x) {
         match choice("Continue?", true) {
@@ -63,7 +66,7 @@ fn run(states: &StateBox, args: Option<&[String]>) -> PostAction {
             Ok(true) => (),
         };
     }
-    if let Err(fault) = upgrade_packages(&data) {
+    if let Err(fault) = runtime.block_on(upgrade_packages(data)) {
         return PostAction::Fuck(fault);
     }
     PostAction::Return

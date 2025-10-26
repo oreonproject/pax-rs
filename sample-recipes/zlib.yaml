@@ -1,0 +1,108 @@
+name: zlib
+version: "1.3.1"
+description: "A compression library implementing the deflate compression method found in gzip and PKZIP"
+author: "Jean-loup Gailly and Mark Adler"
+license: "zlib"
+homepage: "https://zlib.net/"
+repository: "https://github.com/madler/zlib"
+keywords:
+  - compression
+  - library
+  - deflate
+  - gzip
+categories:
+  - libraries
+  - compression
+
+dependencies:
+  build_dependencies:
+    - name: "gcc"
+      version_constraint: ">=4.0"
+      optional: false
+    - name: "make"
+      version_constraint: ">=3.0"
+      optional: false
+    - name: "git"
+      version_constraint: ">=2.0"
+      optional: false
+  runtime_dependencies: []
+  optional_dependencies: []
+  conflicts: []
+
+build:
+  build_system: Make
+  build_commands:
+    - "./configure --prefix=/usr/local"
+    - "make"
+    - "make install DESTDIR=."
+  build_dependencies:
+    - "gcc"
+    - "make"
+    - "git"
+  build_flags: []
+  environment:
+    CFLAGS: "-O2 -Wno-error"
+  working_directory: null
+  target_architectures:
+    - X86_64v1
+    - X86_64v3
+    - Aarch64
+  cross_compiler_prefix: null
+  target_sysroot: null
+
+install:
+  install_method: RunCommands
+  install_commands:
+    - "make install"
+  install_directories:
+    - "/usr/local/lib"
+    - "/usr/local/include"
+  install_files: []
+  post_install_commands:
+    - "ldconfig"
+
+files:
+  include_patterns:
+    - "*.c"
+    - "*.h"
+    - "configure"
+    - "Makefile.in"
+    - "README"
+    - "ChangeLog"
+  exclude_patterns:
+    - "**/*.o"
+    - "**/*.a"
+    - "**/*.so"
+    - "test/**/*"
+    - "examples/**/*"
+    - ".git/**/*"
+  binary_files: []
+  config_files: []
+  documentation_files:
+    - "README"
+    - "ChangeLog"
+  license_files:
+    - "README"
+
+scripts:
+  pre_install: |
+    echo "Installing zlib compression library..."
+  post_install: |
+    echo "zlib installed successfully"
+    echo "Library: /usr/local/lib/libz.so"
+    echo "Headers: /usr/local/include/zlib.h"
+  pre_uninstall: |
+    echo "Removing zlib..."
+  post_uninstall: |
+    echo "zlib removed successfully"
+  pre_upgrade: null
+  post_upgrade: null
+
+metadata:
+  maintainer: "PAX Team <pax@oreon11.org>"
+  section: "libs"
+  priority: "standard"
+  provides:
+    - "libz"
+    - "zlib"
+  conflicts: []

@@ -3,28 +3,30 @@ use settings::OriginKind;
 use utils::{Range, VerReq, Version};
 
 use crate::{
-    DepVer, DependKind,
+    DepVer, depend_kind::DependKind,
     parsers::MetaDataKind,
     processed::{ProcessedCompilable, ProcessedInstallKind, ProcessedMetaData},
 };
 
 #[derive(Debug, Deserialize)]
 pub struct RawPax {
-    name: String,
-    description: String,
-    version: String,
-    origin: String,
-    build_dependencies: Vec<String>,
-    runtime_dependencies: Vec<String>,
-    build: String,
-    install: String,
-    uninstall: String,
-    purge: String,
-    hash: String,
+    pub name: String,
+    pub description: String,
+    pub version: String,
+    pub origin: String,
+    pub build_dependencies: Vec<String>,
+    pub runtime_dependencies: Vec<String>,
+    pub build: String,
+    pub install: String,
+    pub uninstall: String,
+    pub purge: String,
+    pub hash: String,
 }
 
 impl RawPax {
     pub fn process(self) -> Option<ProcessedMetaData> {
+        // Parse the origin string - could be github or pax format
+        // TODO: maybe we should support more formats later? idk
         let origin = if self.origin.starts_with("gh/") {
             let split = self
                 .origin
@@ -45,6 +47,7 @@ impl RawPax {
         // } else {
         //     return None;
         // };
+        // ^^^ commented out for now, might add URL support later
         } else {
             OriginKind::Pax(self.origin.clone())
         };
@@ -66,28 +69,72 @@ impl RawPax {
                 purge: self.purge,
             }),
             hash: self.hash,
+            package_type: "PAX".to_string(),
+            installed: false,
+            dependencies: Vec::new(),
+            dependents: Vec::new(),
+            installed_files: Vec::new(),
+            available_versions: Vec::new(),
         })
     }
     fn parse_ver(ver: &str) -> Option<Range> {
         let mut lower = VerReq::NoBound;
         let mut upper = VerReq::NoBound;
+        
+        // Clean up the version string first
+        let ver = ver.trim();
+        
+        if ver.is_empty() {
+            return Some(Range { lower: VerReq::NoBound, upper: VerReq::NoBound });
+        }
+        
+        // Handle different version constraint formats
         if let Some(ver) = ver.strip_prefix(">>") {
-            lower = VerReq::Gt(Version::parse(ver).ok()?);
+            lower = VerReq::Gt(Version::parse(ver.trim()).ok()?);
         } else if let Some(ver) = ver.strip_prefix(">=") {
-            lower = VerReq::Ge(Version::parse(ver).ok()?);
+            lower = VerReq::Ge(Version::parse(ver.trim()).ok()?);
+        } else if let Some(ver) = ver.strip_prefix(">") {
+            lower = VerReq::Gt(Version::parse(ver.trim()).ok()?);
         } else if let Some(ver) = ver.strip_prefix("==") {
-            lower = VerReq::Eq(Version::parse(ver).ok()?);
-            upper = VerReq::Eq(Version::parse(ver).ok()?);
+            let parsed_ver = Version::parse(ver.trim()).ok()?;
+            lower = VerReq::Eq(parsed_ver.clone());
+            upper = VerReq::Eq(parsed_ver);
+        } else if let Some(ver) = ver.strip_prefix("=") {
+            let parsed_ver = Version::parse(ver.trim()).ok()?;
+            lower = VerReq::Eq(parsed_ver.clone());
+            upper = VerReq::Eq(parsed_ver);
         } else if let Some(ver) = ver.strip_prefix("<=") {
-            upper = VerReq::Le(Version::parse(ver).ok()?);
+            upper = VerReq::Le(Version::parse(ver.trim()).ok()?);
         } else if let Some(ver) = ver.strip_prefix("<<") {
-            upper = VerReq::Lt(Version::parse(ver).ok()?);
+            upper = VerReq::Lt(Version::parse(ver.trim()).ok()?);
+        } else if let Some(ver) = ver.strip_prefix("<") {
+            upper = VerReq::Lt(Version::parse(ver.trim()).ok()?);
+        } else if let Some(ver) = ver.strip_prefix("~") {
+            // Tilde constraint: >= version, < next major version
+            let parsed_ver = Version::parse(ver.trim()).ok()?;
+            lower = VerReq::Ge(parsed_ver.clone());
+            // Calculate next major version
+            let mut next_major = parsed_ver.clone();
+            next_major.major += 1;
+            next_major.minor = 0;
+            next_major.patch = 0;
+            upper = VerReq::Lt(next_major);
+        } else if let Some(ver) = ver.strip_prefix("^") {
+            // Caret constraint: >= version, < next minor version
+            let parsed_ver = Version::parse(ver.trim()).ok()?;
+            lower = VerReq::Ge(parsed_ver.clone());
+            // Calculate next minor version
+            let mut next_minor = parsed_ver.clone();
+            next_minor.minor += 1;
+            next_minor.patch = 0;
+            upper = VerReq::Lt(next_minor);
         } else {
-            lower = VerReq::Eq(Version::parse(ver).ok()?);
-            upper = VerReq::Eq(Version::parse(ver).ok()?);
-        };
-        // Yeah this needs to be done properly, so.....
-        // thingy
+            // Default to exact version match
+            let parsed_ver = Version::parse(ver).ok()?;
+            lower = VerReq::Eq(parsed_ver.clone());
+            upper = VerReq::Eq(parsed_ver);
+        }
+        
         Some(Range { lower, upper })
     }
     fn as_dep_kind(deps: &[String]) -> Option<Vec<DependKind>> {
@@ -100,6 +147,7 @@ impl RawPax {
             //         name: name.to_string(),
             //         range: RawPax::parse_ver(ver)?,
             //     })
+            // ^^^ this was commented out, not sure why tbh
             } else if let Some(index) = dep.find(['=', '>', '<']) {
                 let (name, ver) = dep.split_at(index);
                 DependKind::Specific(DepVer {
