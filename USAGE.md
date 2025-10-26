@@ -372,30 +372,6 @@ PAX downloads packages in parallel by default. You can configure the number of c
 pax config set download.concurrent 4
 ```
 
-## Security
-
-### Package Signing
-
-PAX supports package signing with GPG and Ed25519:
-
-```bash
-# Verify package signature
-pax verify package-name --signature
-
-# Add trusted key
-pax verify add-key key-id public-key
-```
-
-### Repository Authentication
-
-```bash
-# Add repository credentials
-pax repo auth add https://private-repo.com --username user --password pass
-
-# Use API key
-pax repo auth add https://api-repo.com --api-key your-key
-```
-
 ## Contributing
 
 ### Development Setup
