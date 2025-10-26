@@ -402,7 +402,7 @@ pax repo auth add https://api-repo.com --api-key your-key
 
 ```bash
 # Clone repository
-git clone https://github.com/oreon11/pax.git
+git clone https://github.com/oreonproject/pax-rs.git
 cd pax
 
 # Build in development mode
