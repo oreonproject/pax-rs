@@ -1,13 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["commands", "flags", "metadata", "settings", "statebox", "utils", "pax-builder"]
+members = ["commands", "flags", "metadata", "settings", "statebox", "utils"]
 
 [workspace.dependencies]
 commands = { path = "./commands" }
 flags = { path = "./flags" }
 metadata = { path = "./metadata" }
 nix = { version = "0.30.1", features = ["user"] }
-pax-builder = { path = "./pax-builder" }
 reqwest = { version = "0.12.24", features = ["blocking"] }
 settings = { path = "./settings" }
 serde = { version = "1.0.228", features = ["derive"] }
@@ -43,6 +42,8 @@ tokio.workspace = true
 urlencoding.workspace = true
 utils.workspace = true
 sha2.workspace = true
+tempfile.workspace = true
+serde_yaml.workspace = true
 
 # [env]
 # You can find some static variables in .cargo/config.toml

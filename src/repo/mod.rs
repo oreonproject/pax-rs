@@ -86,6 +86,7 @@ fn list_repositories(settings: &SettingsYaml) -> PostAction {
             },
             OriginKind::Deb(url) => ("DEB", format!("deb://{}", url)),
             OriginKind::Yum(url) => ("YUM", format!("yum://{}", url)),
+            OriginKind::LocalDir(path) => ("Local Directory", format!("file://{}", path)),
         };
 
         println!("\x1B[94m{}. {}\x1B[0m", i + 1, repo_type);

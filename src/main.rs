@@ -4,6 +4,7 @@ pub mod configure;
 pub mod emancipate;
 pub mod info;
 pub mod install;
+pub mod isocreate;
 pub mod list;
 pub mod pax_init;
 pub mod remove;
@@ -32,6 +33,7 @@ pub fn main() {
             emancipate::build,
             info::build,
             install::build,
+            isocreate::build,
             list::build,
             pax_init::build,
             remove::build_purge,

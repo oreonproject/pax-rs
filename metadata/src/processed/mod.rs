@@ -424,28 +424,120 @@ impl ProcessedMetaData {
             }
         }
         
+        // Get install root from environment variable PAX_ROOT, default to /
+        let install_root = std::env::var("PAX_ROOT")
+            .ok()
+            .map(|r| PathBuf::from(r))
+            .unwrap_or_else(|| PathBuf::from("/"));
+        
         // Install based on package type
+        // For Compilable packages from repositories, they are prebuilt and install commands handle file placement
+        // Only build from source if explicitly requested with --build flag (not implemented yet)
+        println!("[INSTALL_PKG] Package type: {:?}", self.install_kind);
+        println!("[INSTALL_PKG] Extract dir: {}", extract_dir.display());
+        println!("[INSTALL_PKG] Install root: {}", install_root.display());
         match self.install_kind {
             ProcessedInstallKind::PreBuilt(ref prebuilt) => {
-                self.install_prebuilt_package(&extract_dir, prebuilt, allow_overwrite).await?;
+                println!("[INSTALL_PKG] Installing as PreBuilt package");
+                self.install_prebuilt_package_to_root(&extract_dir, prebuilt, allow_overwrite, &install_root).await?;
             }
             ProcessedInstallKind::Compilable(ref compilable) => {
-                self.install_compilable_package(&extract_dir, compilable).await?;
+                println!("[INSTALL_PKG] Installing as Compilable package");
+                println!("[INSTALL_PKG] Compilable install commands length: {}", compilable.install.len());
+                // Always run install commands - they use DESTDIR to place files correctly
+                self.install_compilable_package_to_root(&extract_dir, compilable, &install_root).await?;
             }
         }
         
-        // Save installed metadata
-        let installed_dir = utils::get_metadata_dir()?;
-        let package_file = installed_dir.join(format!("{}.json", name));
-        let path = package_file;
-        let metadata = self.to_installed_with_parent(installed_by); // Use provided parent
-        metadata.write(&path)?;
-        
-        // Save file manifest for conflict detection
-        file_manifest.save()?;
+        // Save installed metadata - but skip if installing to custom root (PAX_ROOT)
+        // We don't want to pollute system metadata when building ISO
+        let pax_root = std::env::var("PAX_ROOT").ok();
+        if pax_root.is_none() || pax_root.as_deref() == Some("/") {
+            let installed_dir = utils::get_metadata_dir()?;
+            let package_file = installed_dir.join(format!("{}.json", name));
+            let path = package_file;
+            let metadata = self.to_installed_with_parent(installed_by);
+            metadata.write(&path)?;
+            
+            // Save file manifest for conflict detection
+            file_manifest.save()?;
+        }
         
         // Clean up
         let _ = std::fs::remove_dir_all(&extract_dir);
+        
+        Ok(())
+    }
+    
+    async fn install_prebuilt_files_from_extract(&self, extract_dir: &std::path::Path, install_root: &Path, allow_overwrite: bool, installed_by: Option<String>) -> Result<(), String> {
+        use std::fs;
+        use crate::file_tracking::FileManifest;
+        
+        println!("Installing pre-built files from package...");
+        
+        let mut manifest = FileManifest::new(self.name.clone(), self.version.clone());
+        let entries = collect_package_entries(extract_dir)?;
+        let total = entries.len().max(1);
+        let mut processed = 0usize;
+        
+        for (src_path, relative) in entries {
+            processed += 1;
+            let metadata = fs::symlink_metadata(&src_path).map_err(|e| {
+                format!("Failed to inspect {}: {}", src_path.display(), e)
+            })?;
+            
+            let relative_clean = if let Ok(stripped) = relative.strip_prefix("/") {
+                stripped
+            } else {
+                &relative
+            };
+            let dest_path = install_root.join(relative_clean);
+            
+            if metadata.is_dir() {
+                fs::create_dir_all(&dest_path).map_err(|e| {
+                    format!("Failed to create directory {}: {}", dest_path.display(), e)
+                })?;
+                let mode = metadata.permissions().mode();
+                fs::set_permissions(&dest_path, std::fs::Permissions::from_mode(mode)).map_err(|e| {
+                    format!("Failed to set permissions: {}", e)
+                })?;
+                manifest.add_directory(dest_path.clone(), mode);
+            } else if metadata.file_type().is_symlink() {
+                if let Some(parent) = dest_path.parent() {
+                    fs::create_dir_all(parent).map_err(|e| format!("Failed to create parent: {}", e))?;
+                }
+                let target = fs::read_link(&src_path).map_err(|e| format!("Failed to read symlink: {}", e))?;
+                let _ = fs::remove_file(&dest_path);
+                symlink(&target, &dest_path).map_err(|e| format!("Failed to create symlink: {}", e))?;
+                manifest.add_symlink(dest_path.clone(), target);
+            } else if metadata.is_file() {
+                if let Some(parent) = dest_path.parent() {
+                    fs::create_dir_all(parent).map_err(|e| format!("Failed to create parent: {}", e))?;
+                }
+                if dest_path.exists() {
+                    fs::remove_file(&dest_path).map_err(|e| format!("Failed to remove existing: {}", e))?;
+                }
+                fs::copy(&src_path, &dest_path).map_err(|e| format!("Failed to copy file: {}", e))?;
+                let mode = metadata.permissions().mode();
+                fs::set_permissions(&dest_path, std::fs::Permissions::from_mode(mode)).map_err(|e| format!("Failed to set permissions: {}", e))?;
+                let checksum = crate::file_tracking::calculate_file_checksum(&dest_path).unwrap_or_default();
+                manifest.add_file(dest_path.clone(), metadata.len(), mode, checksum);
+            }
+            
+            render_progress("Installing", processed, total, &relative_clean.to_string_lossy());
+        }
+        
+        println!("\nInstalled {} files from prebuilt package.", manifest.files.len());
+        
+        // Save metadata and manifest if not using custom root
+        let pax_root = std::env::var("PAX_ROOT").ok();
+        if pax_root.is_none() || pax_root.as_deref() == Some("/") {
+            let installed_dir = utils::get_metadata_dir()?;
+            let package_file = installed_dir.join(format!("{}.json", self.name));
+            let metadata = self.to_installed_with_parent(installed_by);
+            metadata.write(&package_file)?;
+            manifest.save()?;
+        }
         
         Ok(())
     }
@@ -614,6 +706,35 @@ impl ProcessedMetaData {
                 std::fs::write(&tmpfile, bytes)
                     .map_err(|_| "Failed to write RPM package to temp")?;
             }
+            OriginKind::LocalDir(dir_path) => {
+                // Find package file in local directory
+                let dir = std::path::Path::new(dir_path);
+                if !dir.exists() || !dir.is_dir() {
+                    return Err(format!("Local directory repository does not exist: {}", dir_path));
+                }
+                
+                // Try to find package file matching name and version
+                let possible_files = vec![
+                    dir.join(format!("{}-{}.pax", self.name, self.version)),
+                    dir.join(format!("{}-{}.deb", self.name, self.version)),
+                    dir.join(format!("{}-{}.rpm", self.name, self.version)),
+                    dir.join(format!("{}_{}.deb", self.name, self.version)),
+                ];
+                
+                let mut found = false;
+                for package_path in possible_files {
+                    if package_path.exists() {
+                        std::fs::copy(&package_path, &tmpfile)
+                            .map_err(|e| format!("Failed to copy local package file: {}", e))?;
+                        found = true;
+                        break;
+                    }
+                }
+                
+                if !found {
+                    return Err(format!("Package {}-{} not found in local directory {}", self.name, self.version, dir_path));
+                }
+            }
         }
         
         Ok(tmpfile)
@@ -685,11 +806,66 @@ impl ProcessedMetaData {
                     return err!("Failed to extract archive using tar");
                 }
             }
+            OriginKind::LocalDir(_) => {
+                // LocalDir packages can be .pax, .deb, or .rpm - determine by extension
+                let ext = package_file.extension()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("");
+                
+                match ext {
+                    "pax" => {
+                        let mut tar_cmd = RunCommand::new("tar");
+                        tar_cmd
+                            .arg("-xzf")
+                            .arg(package_file)
+                            .arg("-C")
+                            .arg(extract_dir);
+                        let status = tar_cmd
+                            .status()
+                            .map_err(|_| "Failed to extract PAX package from local directory")?;
+                        if !status.success() {
+                            return err!("Failed to extract PAX package");
+                        }
+                    },
+                    "deb" => {
+                        let mut dpkg_cmd = RunCommand::new("dpkg-deb");
+                        dpkg_cmd.arg("-x").arg(package_file).arg(extract_dir);
+                        let status = dpkg_cmd
+                            .status()
+                            .map_err(|_| "Failed to execute dpkg-deb for extraction")?;
+                        if !status.success() {
+                            return err!("Failed to extract DEB package");
+                        }
+                    },
+                    "rpm" => {
+                        let command = format!(
+                            "rpm2cpio '{}' | cpio -idmv",
+                            package_file.display()
+                        );
+                        let status = RunCommand::new("bash")
+                            .arg("-c")
+                            .arg(command)
+                            .current_dir(extract_dir)
+                            .status()
+                            .map_err(|_| "Failed to extract RPM package")?;
+                        if !status.success() {
+                            return err!("Failed to extract RPM package");
+                        }
+                    },
+                    _ => {
+                        return err!("Unknown package format in local directory: {}", ext);
+                    }
+                }
+            }
         }
         Ok(())
     }
     
     async fn install_prebuilt_package(&self, extract_dir: &std::path::Path, _prebuilt: &PreBuilt, allow_overwrite: bool) -> Result<(), String> {
+        self.install_prebuilt_package_to_root(extract_dir, _prebuilt, allow_overwrite, Path::new("/")).await
+    }
+    
+    async fn install_prebuilt_package_to_root(&self, extract_dir: &std::path::Path, prebuilt: &PreBuilt, allow_overwrite: bool, install_root: &Path) -> Result<(), String> {
         use std::fs;
         use crate::file_tracking::FileManifest;
 
@@ -710,7 +886,13 @@ impl ProcessedMetaData {
                 format!("Failed to inspect {}: {}", src_path.display(), e)
             })?;
 
-            let dest_path = Path::new("/").join(&relative);
+            // Strip leading slash from relative path so join works correctly
+            let relative_clean = if let Ok(stripped) = relative.strip_prefix("/") {
+                stripped
+            } else {
+                &relative
+            };
+            let dest_path = install_root.join(relative_clean);
 
             if metadata.is_dir() {
                 fs::create_dir_all(&dest_path).map_err(|e| {
@@ -856,27 +1038,65 @@ impl ProcessedMetaData {
     }
     
     async fn install_compilable_package(&self, extract_dir: &std::path::Path, compilable: &ProcessedCompilable) -> Result<(), String> {
-        println!("Building and installing from source...");
+        let install_root = std::env::var("PAX_ROOT")
+            .ok()
+            .map(|r| PathBuf::from(r))
+            .unwrap_or_else(|| PathBuf::from("/"));
+        self.install_compilable_package_to_root(extract_dir, compilable, &install_root).await
+    }
+    
+    async fn install_compilable_package_to_root(&self, extract_dir: &std::path::Path, compilable: &ProcessedCompilable, install_root: &Path) -> Result<(), String> {
+        if compilable.install.is_empty() {
+            return Err(format!("Install commands are empty for {}", self.name));
+        }
         
-        // Find the build directory
-        let build_dir = self.find_build_directory(extract_dir)?;
+        use std::io::Write;
         
-        // Build the package
-        println!("Building...");
-        let mut build_cmd = RunCommand::new("bash");
-        build_cmd.arg("-c").arg(&compilable.build).current_dir(&build_dir);
-        if build_cmd.status().is_err() {
-            return err!("Build failed");
-                }
-                        
-        // Install the package
-        println!("Installing...");
-        let mut install_cmd = RunCommand::new("bash");
-        install_cmd.arg("-c").arg(&compilable.install).current_dir(&build_dir);
-        if install_cmd.status().is_err() {
-            return err!("Install failed");
-                        }
+        println!("[{}] Running install commands from: {}", self.name, extract_dir.display());
+        println!("[{}] DESTDIR={}", self.name, install_root.display());
+        println!("[{}] Install script:\n{}", self.name, compilable.install);
+        std::io::stdout().flush().unwrap();
         
+        // Run install commands - split by newlines if multiple commands
+        let commands: Vec<&str> = compilable.install.lines().collect();
+        
+        for (i, cmd) in commands.iter().enumerate() {
+            let cmd = cmd.trim();
+            if cmd.is_empty() || cmd.starts_with('#') {
+                continue;
+            }
+            
+            println!("[{}] Executing install command {}: {}", self.name, i + 1, cmd);
+            std::io::stdout().flush().unwrap();
+            
+            let mut install_cmd = RunCommand::new("bash");
+            install_cmd.arg("-c").arg(cmd);
+            install_cmd.current_dir(extract_dir);
+            install_cmd.env("DESTDIR", install_root.to_string_lossy().to_string());
+            install_cmd.env("TARGET", "x86_64-unknown-linux-gnu");
+            
+            let output = install_cmd.output().map_err(|e| format!("Failed to execute install command '{}': {}", cmd, e))?;
+            
+            if !output.stdout.is_empty() {
+                println!("[{}] Command {} stdout: {}", self.name, i + 1, String::from_utf8_lossy(&output.stdout));
+            }
+            if !output.stderr.is_empty() {
+                println!("[{}] Command {} stderr: {}", self.name, i + 1, String::from_utf8_lossy(&output.stderr));
+            }
+            std::io::stdout().flush().unwrap();
+            
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                return Err(format!("Install command {} failed for {}:\nCommand: {}\nstdout: {}\nstderr: {}", i + 1, self.name, cmd, stdout, stderr));
+            }
+            
+            println!("[{}] Command {} completed successfully", self.name, i + 1);
+            std::io::stdout().flush().unwrap();
+        }
+        
+        println!("[{}] All install commands completed", self.name);
+        std::io::stdout().flush().unwrap();
         Ok(())
     }
     
@@ -964,8 +1184,11 @@ impl ProcessedMetaData {
             );
         };
 
-        let raw_pax = serde_norway::from_str::<RawPax>(&manifest_content)
-            .map_err(|_| "Failed to parse manifest.yaml as PAX format")?;
+        // Fix common YAML issues in manifests (malformed quotes, etc.)
+        let fixed_manifest = Self::fix_yaml_syntax(&manifest_content);
+
+        let raw_pax = serde_norway::from_str::<RawPax>(&fixed_manifest)
+            .map_err(|e| format!("Failed to parse manifest.yaml as PAX format: {}", e))?;
 
         // Note: We don't verify the embedded hash because the manifest itself contains the hash,
         // creating a circular dependency. The hash in manifest.yaml is informational only.
@@ -1125,6 +1348,61 @@ impl ProcessedMetaData {
         let _ = fs::remove_dir_all(&temp_dir);
 
         Ok(metadata)
+    }
+
+    /// Fix common YAML syntax issues in package manifests
+    /// Handles unescaped quotes in double-quoted strings
+    fn fix_yaml_syntax(content: &str) -> String {
+        let mut fixed_lines = Vec::new();
+        
+        for line in content.lines() {
+            // Check if this is a YAML key-value line with a quoted string
+            if let Some(colon_pos) = line.find(':') {
+                let key_part = &line[..colon_pos];
+                let value_part = line[colon_pos + 1..].trim();
+                
+                // If the value starts with a double quote, fix inner unescaped quotes
+                if value_part.starts_with('"') && !value_part.starts_with("\"\"") {
+                    // Find where the string should actually end
+                    // Strategy: Use single quotes for the outer string to preserve inner double quotes
+                    if value_part.len() > 1 {
+                        // Check if there's an unescaped quote inside
+                        let inner = &value_part[1..]; // Skip first quote
+                        
+                        // If we find an unescaped quote before the end, we need to fix it
+                        let mut quote_positions = Vec::new();
+                        let mut chars: Vec<char> = inner.chars().collect();
+                        let mut i = 0;
+                        
+                        while i < chars.len() {
+                            if chars[i] == '"' && (i == 0 || chars[i-1] != '\\') {
+                                quote_positions.push(i);
+                            }
+                            i += 1;
+                        }
+                        
+                        // If there's more than one quote (the ending quote), we have inner quotes
+                        if quote_positions.len() > 1 {
+                            // Use YAML literal block scalar for complex strings
+                            fixed_lines.push(format!("{}: |", key_part));
+                            // Remove the surrounding quotes and add as literal
+                            let content_without_quotes = if value_part.ends_with('"') {
+                                &value_part[1..value_part.len()-1]
+                            } else {
+                                &value_part[1..]
+                            };
+                            fixed_lines.push(format!("  {}", content_without_quotes));
+                            continue;
+                        }
+                    }
+                }
+            }
+            
+            // No fix needed, keep original line
+            fixed_lines.push(line.to_string());
+        }
+        
+        fixed_lines.join("\n")
     }
 
     fn create_temp_dir(prefix: &str) -> Result<std::path::PathBuf, String> {
@@ -1522,6 +1800,100 @@ impl ProcessedMetaData {
                             Some(processed)
                         } else {
                             None
+                        }
+                    };
+                }
+                OriginKind::LocalDir(dir_path) => {
+                    metadata = {
+                        // Scan local directory for package files (.pax, .deb, .rpm)
+                        let dir = Path::new(dir_path);
+                        if !dir.exists() || !dir.is_dir() {
+                            eprintln!("[LOCALDIR] Directory does not exist or is not a directory: {}", dir_path);
+                            None
+                        } else {
+                            eprintln!("[LOCALDIR] Scanning directory {} for package {}", dir_path, app);
+                            // Try to find package files matching the name
+                            let possible_files = if let Some(version) = version {
+                                vec![
+                                    dir.join(format!("{}-{}.pax", app, version)),
+                                    dir.join(format!("{}-{}.deb", app, version)),
+                                    dir.join(format!("{}-{}.rpm", app, version)),
+                                    dir.join(format!("{}_{}.deb", app, version)),
+                                    dir.join(format!("{}-{}-{}.rpm", app, version, "x86_64")),
+                                ]
+                            } else {
+                                // For latest version, scan all files and pick the one matching the name
+                                // Prefer x86_64v3, then x86_64v1, then others
+                                let mut candidates_v3 = Vec::new();
+                                let mut candidates_v1 = Vec::new();
+                                let mut candidates_other = Vec::new();
+                                let mut all_files = Vec::new();
+                                if let Ok(entries) = fs::read_dir(dir) {
+                                    for entry in entries.flatten() {
+                                        let path = entry.path();
+                                        if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                                            all_files.push(file_name.to_string());
+                                            // Check if it matches the package name (must start with package name followed by -)
+                                            // Exclude .src.pax files (source packages)
+                                            let prefix = format!("{}-", app);
+                                            if !file_name.contains(".src.") &&
+                                               ((file_name.starts_with(&prefix) && file_name.ends_with(".pax")) ||
+                                                (file_name.starts_with(&prefix) && file_name.ends_with(".deb")) ||
+                                                (file_name.starts_with(&prefix) && file_name.ends_with(".rpm"))) {
+                                                // Prioritize by architecture
+                                                if file_name.contains("x86_64v3") {
+                                                    candidates_v3.push(path.clone());
+                                                    eprintln!("[LOCALDIR] Found x86_64v3 candidate: {}", file_name);
+                                                } else if file_name.contains("x86_64v1") {
+                                                    candidates_v1.push(path.clone());
+                                                    eprintln!("[LOCALDIR] Found x86_64v1 candidate: {}", file_name);
+                                                } else {
+                                                    candidates_other.push(path.clone());
+                                                    eprintln!("[LOCALDIR] Found other candidate: {}", file_name);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                eprintln!("[LOCALDIR] All files in directory: {:?}", all_files);
+                                eprintln!("[LOCALDIR] Looking for packages starting with '{}-'", app);
+                                eprintln!("[LOCALDIR] Found {} x86_64v3 candidate(s), {} x86_64v1 candidate(s), {} other candidate(s)", 
+                                    candidates_v3.len(), candidates_v1.len(), candidates_other.len());
+                                // Prefer v3, then v1, then others
+                                if !candidates_v3.is_empty() {
+                                    candidates_v3
+                                } else if !candidates_v1.is_empty() {
+                                    candidates_v1
+                                } else {
+                                    candidates_other
+                                }
+                            };
+                            
+                            let mut found_metadata = None;
+                            for package_path in possible_files {
+                                eprintln!("[LOCALDIR] Trying: {}", package_path.display());
+                                if package_path.exists() {
+                                    eprintln!("[LOCALDIR] File exists, attempting to parse metadata...");
+                                    if let Some(path_str) = package_path.to_str() {
+                                        match Self::get_metadata_from_local_package(path_str).await {
+                                            Ok(processed) => {
+                                                eprintln!("[LOCALDIR] Successfully parsed package: {} {}", processed.name, processed.version);
+                                                found_metadata = Some(processed);
+                                                break;
+                                            }
+                                            Err(e) => {
+                                                eprintln!("[LOCALDIR] Failed to parse package {}: {}", package_path.display(), e);
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    eprintln!("[LOCALDIR] File does not exist: {}", package_path.display());
+                                }
+                            }
+                            if found_metadata.is_none() {
+                                eprintln!("[LOCALDIR] No package found for {} in {}", app, dir_path);
+                            }
+                            found_metadata
                         }
                     };
                 }

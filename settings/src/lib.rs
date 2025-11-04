@@ -134,6 +134,7 @@ pub enum OriginKind {
     },
     Deb(String),  // Enhanced dpkg/deb support
     Yum(String), // Enhanced dnf/yum support
+    LocalDir(String), // Local directory repository
 }
 
 impl std::fmt::Display for OriginKind {
@@ -148,6 +149,7 @@ impl std::fmt::Display for OriginKind {
             },
             OriginKind::Deb(url) => write!(f, "DEB: {}", url),
             OriginKind::Yum(url) => write!(f, "YUM: {}", url),
+            OriginKind::LocalDir(path) => write!(f, "Local: {}", path),
         }
     }
 }
@@ -252,6 +254,21 @@ fn load_sources_conf(dir: &Path) -> Result<(Option<String>, Vec<OriginKind>), St
                                     region,
                                 }
                             },
+                            Some("local") | Some("dir") | Some("directory") => {
+                                // Check if it's a valid directory
+                                let dir_path = Path::new(&url);
+                                if dir_path.exists() && dir_path.is_dir() {
+                                    OriginKind::LocalDir(url.clone())
+                                } else {
+                                    println!(
+                                        "\x1B[93m[WARN] Local directory repository does not exist: `{}` on line {} of {}.\x1B[0m",
+                                        url,
+                                        idx + 1,
+                                        path.display()
+                                    );
+                                    continue;
+                                }
+                            },
                             _ => OriginKind::Pax(url.clone()),
                         };
                         sources.push(origin);
@@ -301,6 +318,24 @@ fn load_sources_conf(dir: &Path) -> Result<(Option<String>, Vec<OriginKind>), St
                         } else {
                             println!(
                                 "\x1B[93m[WARN] Invalid GitHub URL `{}` on line {} of {}.\x1B[0m",
+                                url,
+                                idx + 1,
+                                path.display()
+                            );
+                        }
+                    } else if url.starts_with("file://") || url.starts_with("/") || url.starts_with("./") || url.starts_with("../") {
+                        // Local directory repository
+                        let dir_path = if url.starts_with("file://") {
+                            url.strip_prefix("file://").unwrap().to_string()
+                        } else {
+                            url.to_string()
+                        };
+                        let dir_path = Path::new(&dir_path);
+                        if dir_path.exists() && dir_path.is_dir() {
+                            sources.push(OriginKind::LocalDir(dir_path.to_string_lossy().to_string()));
+                        } else {
+                            println!(
+                                "\x1B[93m[WARN] Local directory repository does not exist or is not a directory: `{}` on line {} of {}.\x1B[0m",
                                 url,
                                 idx + 1,
                                 path.display()
