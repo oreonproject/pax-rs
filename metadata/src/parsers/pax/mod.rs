@@ -1,4 +1,6 @@
 use serde::Deserialize;
+use serde::de::{self, Deserializer, MapAccess, Visitor};
+use std::fmt;
 use settings::OriginKind;
 use utils::{Range, VerReq, Version};
 
@@ -8,7 +10,19 @@ use crate::{
     processed::{ProcessedCompilable, ProcessedInstallKind, ProcessedMetaData},
 };
 
-#[derive(Debug, Deserialize)]
+// Helper function to normalize field names (handles both hyphen and underscore variants)
+// This is case-insensitive and handles any whitespace variations
+fn normalize_key(key: &str) -> String {
+    let trimmed = key.trim();
+    let lower = trimmed.to_lowercase();
+    match lower.as_str() {
+        "build-dependencies" | "build_dependencies" | "builddependencies" => "build_dependencies".to_string(),
+        "runtime-dependencies" | "runtime_dependencies" | "runtimedependencies" => "runtime_dependencies".to_string(),
+        _ => trimmed.to_string(),
+    }
+}
+
+#[derive(Debug)]
 pub struct RawPax {
     pub name: String,
     pub description: String,
@@ -21,6 +35,128 @@ pub struct RawPax {
     pub uninstall: String,
     pub purge: String,
     pub hash: String,
+}
+
+impl<'de> Deserialize<'de> for RawPax {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct RawPaxVisitor;
+
+        impl<'de> Visitor<'de> for RawPaxVisitor {
+            type Value = RawPax;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("struct RawPax")
+            }
+
+            fn visit_map<V>(self, mut map: V) -> Result<RawPax, V::Error>
+            where
+                V: MapAccess<'de>,
+            {
+                let mut name = None;
+                let mut description = None;
+                let mut version = None;
+                let mut origin = None;
+                let mut build_dependencies = None;
+                let mut runtime_dependencies = None;
+                let mut build = None;
+                let mut install = None;
+                let mut uninstall = None;
+                let mut purge = None;
+                let mut hash = None;
+
+                while let Some(key) = map.next_key::<String>()? {
+                    // Normalize the key (trim whitespace and handle variations)
+                    let normalized = normalize_key(&key);
+                    
+                    match normalized.as_str() {
+                        "name" => {
+                            if name.is_none() {
+                                name = Some(map.next_value()?);
+                            }
+                        }
+                        "description" => {
+                            if description.is_none() {
+                                description = Some(map.next_value()?);
+                            }
+                        }
+                        "version" => {
+                            if version.is_none() {
+                                version = Some(map.next_value()?);
+                            }
+                        }
+                        "origin" => {
+                            if origin.is_none() {
+                                origin = Some(map.next_value()?);
+                            }
+                        }
+                        "build_dependencies" => {
+                            // Accept the value regardless of whether we've seen it before
+                            // This handles cases where both hyphen and underscore versions exist
+                            let value: Vec<String> = map.next_value()?;
+                            if build_dependencies.is_none() {
+                                build_dependencies = Some(value);
+                            }
+                        }
+                        "runtime_dependencies" => {
+                            // Accept the value regardless of whether we've seen it before
+                            let value: Vec<String> = map.next_value()?;
+                            if runtime_dependencies.is_none() {
+                                runtime_dependencies = Some(value);
+                            }
+                        }
+                        "build" => {
+                            if build.is_none() {
+                                build = Some(map.next_value()?);
+                            }
+                        }
+                        "install" => {
+                            if install.is_none() {
+                                install = Some(map.next_value()?);
+                            }
+                        }
+                        "uninstall" => {
+                            if uninstall.is_none() {
+                                uninstall = Some(map.next_value()?);
+                            }
+                        }
+                        "purge" => {
+                            if purge.is_none() {
+                                purge = Some(map.next_value()?);
+                            }
+                        }
+                        "hash" => {
+                            if hash.is_none() {
+                                hash = Some(map.next_value()?);
+                            }
+                        }
+                        _ => {
+                            // Ignore unknown fields for forward compatibility
+                            let _ = map.next_value::<de::IgnoredAny>();
+                        }
+                    }
+                }
+
+                Ok(RawPax {
+                    name: name.ok_or_else(|| de::Error::missing_field("name"))?,
+                    description: description.ok_or_else(|| de::Error::missing_field("description"))?,
+                    version: version.ok_or_else(|| de::Error::missing_field("version"))?,
+                    origin: origin.ok_or_else(|| de::Error::missing_field("origin"))?,
+                    build_dependencies: build_dependencies.unwrap_or_default(),
+                    runtime_dependencies: runtime_dependencies.unwrap_or_default(),
+                    build: build.ok_or_else(|| de::Error::missing_field("build"))?,
+                    install: install.ok_or_else(|| de::Error::missing_field("install"))?,
+                    uninstall: uninstall.ok_or_else(|| de::Error::missing_field("uninstall"))?,
+                    purge: purge.ok_or_else(|| de::Error::missing_field("purge"))?,
+                    hash: hash.ok_or_else(|| de::Error::missing_field("hash"))?,
+                })
+            }
+        }
+
+        deserializer.deserialize_map(RawPaxVisitor)
+    }
 }
 
 impl RawPax {

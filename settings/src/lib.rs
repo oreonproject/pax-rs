@@ -423,16 +423,56 @@ fn affirm_path() -> Result<PathBuf, String> {
 }
 
 pub fn acquire_lock() -> Result<Option<PostAction>, String> {
+    acquire_lock_with_auto_force(false)
+}
+
+pub fn acquire_lock_with_auto_force(auto_force_unlock: bool) -> Result<Option<PostAction>, String> {
     if !is_root() {
         return Ok(Some(PostAction::Elevate));
     }
     let mut settings = SettingsYaml::get_settings()?;
     let mut attempts = 0;
     const MAX_ATTEMPTS: i32 = 10; // Give up after 10 attempts (50 seconds total)
+    let mut user_chose_kill = false;
     
     loop {
         if settings.locked {
             attempts += 1;
+            
+            // On first attempt, ask if user wants to force unlock immediately (unless auto_force_unlock is true)
+            if attempts == 1 && !user_chose_kill {
+                if auto_force_unlock {
+                    // Auto-force unlock when --yes flag is used
+                    println!("\x1B[93m[WARN] Program lock detected. Auto-forcing unlock (--yes flag active).\x1B[0m");
+                    let mut tmp_settings = SettingsYaml::get_settings()?;
+                    tmp_settings.locked = false;
+                    tmp_settings.set_settings()?;
+                    settings = SettingsYaml::get_settings()?;
+                    user_chose_kill = true;
+                    break;
+                } else {
+                    use utils::choice;
+                    match choice("\x1B[93m[WARN] Program lock detected. Force unlock immediately? (y/n)\x1B[0m", false) {
+                        Ok(true) => {
+                            println!("\x1B[93m[WARN] Forcing unlock (previous instance likely crashed).\x1B[0m");
+                            let mut tmp_settings = SettingsYaml::get_settings()?;
+                            tmp_settings.locked = false;
+                            tmp_settings.set_settings()?;
+                            settings = SettingsYaml::get_settings()?;
+                            user_chose_kill = true;
+                            break;
+                        }
+                        Ok(false) => {
+                            // User chose to wait, continue with normal retry cycle
+                            println!("\x1B[93mWaiting for lock to be released...\x1B[0m");
+                        }
+                        Err(_) => {
+                            // Error reading input, continue with normal retry
+                            println!("\x1B[93mWaiting for lock to be released...\x1B[0m");
+                        }
+                    }
+                }
+            }
             
             if attempts >= MAX_ATTEMPTS {
                 // Force unlock and continue - better than hanging forever
@@ -443,47 +483,51 @@ pub fn acquire_lock() -> Result<Option<PostAction>, String> {
                 break;
             }
             
-            for i in 0..20 {
-                print!(
-                    "\x1B[2K\r\x1B[91mAwaiting program lock. Retrying in {:.2}s...\x1B[0m",
-                    (100 - i) as f32 / 20f32
-                );
-                let _ = std::io::stdout().flush();
-                sleep(Duration::from_millis(50));
+            // Show retry messages (unless user already chose to kill)
+            if !user_chose_kill {
+            
+                for i in 0..20 {
+                    print!(
+                        "\x1B[2K\r\x1B[91mAwaiting program lock. Retrying in {:.2}s...\x1B[0m",
+                        (100 - i) as f32 / 20f32
+                    );
+                    let _ = std::io::stdout().flush();
+                    sleep(Duration::from_millis(50));
+                }
+                for i in 0..20 {
+                    print!(
+                        "\x1B[2K\r\x1B[93mAwaiting program lock. Retrying in {:.2}s\x1B[0m...",
+                        (80 - i) as f32 / 20f32
+                    );
+                    let _ = std::io::stdout().flush();
+                    sleep(Duration::from_millis(50));
+                }
+                for i in 0..20 {
+                    print!(
+                        "\x1B[2K\r\x1B[95mAwaiting program lock. Retrying in {:.2}s\x1B[0m...",
+                        (60 - i) as f32 / 20f32
+                    );
+                    let _ = std::io::stdout().flush();
+                    sleep(Duration::from_millis(50));
+                }
+                for i in 0..20 {
+                    print!(
+                        "\x1B[2K\r\x1B[94mAwaiting program lock. Retrying in {:.2}s\x1B[0m...",
+                        (40 - i) as f32 / 20f32
+                    );
+                    let _ = std::io::stdout().flush();
+                    sleep(Duration::from_millis(50));
+                }
+                for i in 0..20 {
+                    print!(
+                        "\x1B[2K\r\x1B[92mAwaiting program lock. Retrying in {:.2}s\x1B[0m...",
+                        (20 - i) as f32 / 20f32
+                    );
+                    let _ = std::io::stdout().flush();
+                    sleep(Duration::from_millis(50));
+                }
+                println!("\x1B[2K\r\x1B[92mAwaiting program lock. Retrying now\x1B[0m...");
             }
-            for i in 0..20 {
-                print!(
-                    "\x1B[2K\r\x1B[93mAwaiting program lock. Retrying in {:.2}s\x1B[0m...",
-                    (80 - i) as f32 / 20f32
-                );
-                let _ = std::io::stdout().flush();
-                sleep(Duration::from_millis(50));
-            }
-            for i in 0..20 {
-                print!(
-                    "\x1B[2K\r\x1B[95mAwaiting program lock. Retrying in {:.2}s\x1B[0m...",
-                    (60 - i) as f32 / 20f32
-                );
-                let _ = std::io::stdout().flush();
-                sleep(Duration::from_millis(50));
-            }
-            for i in 0..20 {
-                print!(
-                    "\x1B[2K\r\x1B[94mAwaiting program lock. Retrying in {:.2}s\x1B[0m...",
-                    (40 - i) as f32 / 20f32
-                );
-                let _ = std::io::stdout().flush();
-                sleep(Duration::from_millis(50));
-            }
-            for i in 0..20 {
-                print!(
-                    "\x1B[2K\r\x1B[92mAwaiting program lock. Retrying in {:.2}s\x1B[0m...",
-                    (20 - i) as f32 / 20f32
-                );
-                let _ = std::io::stdout().flush();
-                sleep(Duration::from_millis(50));
-            }
-            println!("\x1B[2K\r\x1B[92mAwaiting program lock. Retrying now\x1B[0m...");
             settings = SettingsYaml::get_settings()?;
         } else {
             break;

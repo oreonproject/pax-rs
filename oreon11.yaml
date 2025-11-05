@@ -35,6 +35,8 @@ packages:
   - openssl
   - pcre2
   - xz
+  - pax-rs
+  - gcc
 
 repositories:
   - type: local

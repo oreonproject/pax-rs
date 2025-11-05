@@ -118,7 +118,15 @@ fn run(states: &StateBox, _args: Option<&[String]>) -> PostAction {
         .unwrap_or_else(|| String::from(""));
     
     let package_list: Vec<String> = if let Some(ref tmpl) = template {
-        tmpl.packages.clone().unwrap_or_default()
+        let raw_packages = tmpl.packages.clone().unwrap_or_default();
+        println!("[TEMPLATE] Raw packages from YAML: {:?}", raw_packages);
+        let processed = raw_packages
+            .iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        println!("[TEMPLATE] Processed package list: {:?}", processed);
+        processed
     } else if !packages_str.is_empty() {
         packages_str
             .split(',')
@@ -157,6 +165,7 @@ fn run(states: &StateBox, _args: Option<&[String]>) -> PostAction {
     println!("Building live ISO image...");
     println!("Output: {}", output_path.display());
     println!("Packages to include: {}", package_list.join(", "));
+    println!("[DEBUG] Package list count: {}, packages: {:?}", package_list.len(), package_list);
     if !repositories.is_empty() {
         println!("Repositories: {}", repositories.len());
     }
@@ -174,8 +183,21 @@ fn run(states: &StateBox, _args: Option<&[String]>) -> PostAction {
     };
     
     match build_iso(&runtime, &package_list, &repositories, &output_path, template.as_ref()) {
-        Ok(()) => {
+        Ok(missing_packages) => {
             println!("\n\x1B[92mISO created successfully: {}\x1B[0m", output_path.display());
+            
+            if !missing_packages.is_empty() {
+                println!("\n\x1B[93mSUMMARY: Missing Packages\x1B[0m");
+                println!("\x1B[93mThe following {} package(s) were requested but not found:\x1B[0m", missing_packages.len());
+                for pkg_info in &missing_packages {
+                    println!("\n  - {}", pkg_info.name);
+                    for detail in &pkg_info.details {
+                        println!("    {}", detail);
+                    }
+                }
+                println!();
+            }
+            
             PostAction::Return
         }
         Err(fault) => PostAction::Fuck(fault),
@@ -309,7 +331,7 @@ fn build_iso(
     repositories: &[OriginKind],
     output_path: &Path,
     template: Option<&IsoTemplate>,
-) -> Result<(), String> {
+) -> Result<Vec<MissingPackageInfo>, String> {
     // Create temporary directory for ISO structure
     let temp_dir = tempfile::tempdir()
         .map_err(|e| format!("Failed to create temp directory: {}", e))?;
@@ -338,16 +360,22 @@ fn build_iso(
             .map_err(|e| format!("Failed to create directory {}: {}", dir, e))?;
     }
     
+    // Track missing packages for summary at the end
+    let mut missing_packages_summary = Vec::new();
+    
     // Fetch and install packages to rootfs
     if !package_list.is_empty() {
         println!("Fetching packages from {} repository(ies)...", repositories.len());
-        let remote_data = runtime.block_on(fetch_packages_from_repos(
+        let (remote_data, missing_info) = runtime.block_on(fetch_packages_from_repos(
             package_list.to_vec(),
             repositories,
         ))
         .map_err(|e| format!("Failed to get packages: {}", e))?;
         
-        // Validate that critical packages were found
+        // Store missing packages with details for summary at the end
+        missing_packages_summary = missing_info.clone();
+        
+        // Calculate found and requested package names for validation
         let found_package_names_lower: std::collections::HashSet<String> = remote_data
             .iter()
             .map(|p| p.metadata.name.to_lowercase())
@@ -358,12 +386,7 @@ fn build_iso(
             .map(|s| s.to_lowercase())
             .collect();
         
-        // Find missing packages
-        let missing_packages: Vec<String> = requested_package_names_lower
-            .iter()
-            .filter(|name| !found_package_names_lower.contains(*name))
-            .cloned()
-            .collect();
+        let missing_packages: Vec<String> = missing_info.iter().map(|info| info.name.clone()).collect();
         
         // Check for missing critical packages (kernel-related)
         let kernel_package_names = vec!["linux-kernel", "kernel", "linux", "linux-image"];
@@ -386,14 +409,6 @@ fn build_iso(
             found_kernel_package = found_package_names_lower.iter().any(|n| {
                 n.contains("kernel") || n.contains("linux-image") || n.starts_with("linux-")
             });
-        }
-        
-        // Warn about missing packages
-        if !missing_packages.is_empty() {
-            eprintln!("\n\x1B[93mWARNING: The following packages were not found in repositories:\x1B[0m");
-            for pkg in &missing_packages {
-                eprintln!("  - {}", pkg);
-            }
         }
         
         // Fail if critical kernel packages are missing
@@ -421,7 +436,7 @@ fn build_iso(
         println!("[DEBUG] Fetched {} packages from repositories (requested {} packages)", 
             remote_data.len(), package_list.len());
         if !missing_packages.is_empty() {
-            println!("[DEBUG] {} package(s) were not found", missing_packages.len());
+            println!("[DEBUG] {} package(s) were not found: {:?}", missing_packages.len(), missing_packages);
         }
         std::io::stdout().flush().unwrap();
         
@@ -895,7 +910,7 @@ echo "Type 'poweroff' to shutdown or 'reboot' to restart."
     println!("Creating ISO image...");
     create_iso_image(&iso_root, output_path)?;
     
-    Ok(())
+    Ok(missing_packages_summary)
 }
 
 /// Automatically fix missing library dependencies by creating compatibility symlinks
@@ -1084,11 +1099,34 @@ async fn download_package_file(metadata: &metadata::ProcessedMetaData) -> Result
     match &metadata.origin {
         OriginKind::LocalDir(dir_path) => {
             let dir = std::path::Path::new(dir_path);
-            let possible_files = vec![
+            // Try exact match first
+            let mut possible_files = vec![
                 dir.join(format!("{}-{}.pax", metadata.name, metadata.version)),
                 dir.join(format!("{}-{}.deb", metadata.name, metadata.version)),
                 dir.join(format!("{}-{}.rpm", metadata.name, metadata.version)),
             ];
+            
+            // Also try with architecture suffixes (x86_64v3, x86_64v1, x86_64)
+            for arch in &["x86_64v3", "x86_64v1", "x86_64"] {
+                possible_files.push(dir.join(format!("{}-{}-{}.pax", metadata.name, metadata.version, arch)));
+                possible_files.push(dir.join(format!("{}-{}-{}.deb", metadata.name, metadata.version, arch)));
+                possible_files.push(dir.join(format!("{}-{}-{}.rpm", metadata.name, metadata.version, arch)));
+            }
+            
+            // Scan directory for files matching the pattern (in case exact match doesn't work)
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                let prefix = format!("{}-{}", metadata.name, metadata.version);
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                        if file_name.starts_with(&prefix) && 
+                           (file_name.ends_with(".pax") || file_name.ends_with(".deb") || file_name.ends_with(".rpm")) &&
+                           !file_name.contains(".src.") {
+                            possible_files.push(path);
+                        }
+                    }
+                }
+            }
             
             for package_path in possible_files {
                 if package_path.exists() {
@@ -1097,7 +1135,7 @@ async fn download_package_file(metadata: &metadata::ProcessedMetaData) -> Result
                     return Ok(tmpfile);
                 }
             }
-            Err(format!("Package {}-{} not found", metadata.name, metadata.version))
+            Err(format!("Package {}-{} not found in {}", metadata.name, metadata.version, dir_path))
         }
         OriginKind::Pax(url) => {
             if url.starts_with("http://") || url.starts_with("https://") {
@@ -2543,25 +2581,34 @@ fn create_squashfs(rootfs: &Path, output: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Debug, Clone)]
+struct MissingPackageInfo {
+    name: String,
+    details: Vec<String>,
+}
+
 async fn fetch_packages_from_repos(
     package_names: Vec<String>,
     repositories: &[OriginKind],
-) -> Result<Vec<metadata::InstallPackage>, String> {
+) -> Result<(Vec<metadata::InstallPackage>, Vec<MissingPackageInfo>), String> {
     use metadata::ProcessedMetaData;
-    use std::io::Write;
-    
-    println!("[FETCH] Searching for {} packages in {} repositories", package_names.len(), repositories.len());
-    std::io::stdout().flush().unwrap();
+    use std::collections::HashSet;
     
     let mut packages = Vec::new();
+    let mut missing_packages = Vec::new();
+    let mut visited = HashSet::new(); // Track visited packages to prevent infinite loops
+    let explicit_packages: HashSet<String> = package_names.iter().cloned().collect(); // Packages explicitly requested
     
     for name in package_names {
-        println!("[FETCH] Looking for package: {}", name);
-        std::io::stdout().flush().unwrap();
+        // Always process explicitly requested packages, even if already visited as a dependency
+        let is_explicit = explicit_packages.contains(&name);
+        
         if let Some(metadata) = ProcessedMetaData::get_metadata(&name, None, repositories, true).await {
-            println!("[FETCH] Found package {} version {}", metadata.name, metadata.version);
-            std::io::stdout().flush().unwrap();
+            // Mark as visited after successfully fetching metadata
+            visited.insert(name.clone());
+            
             // Resolve dependencies using the template repositories
+            // Only process ONE level of dependencies - do not recursively resolve
             let mut run_deps = Vec::new();
             for dep in &metadata.runtime_dependencies {
                 let dep_name = match dep {
@@ -2569,8 +2616,16 @@ async fn fetch_packages_from_repos(
                     metadata::depend_kind::DependKind::Specific(dv) => dv.name.clone(),
                     metadata::depend_kind::DependKind::Volatile(n) => n.clone(),
                 };
-                if let Some(dep_metadata) = ProcessedMetaData::get_metadata(&dep_name, None, repositories, true).await {
-                    run_deps.push(dep_metadata);
+                // Skip self-dependencies to prevent infinite loops (e.g., gcc depends on gcc)
+                if dep_name == name {
+                    continue;
+                }
+                // Only process dependencies we haven't seen yet - strict check to prevent loops
+                if !visited.contains(&dep_name) {
+                    visited.insert(dep_name.clone());
+                    if let Some(dep_metadata) = ProcessedMetaData::get_metadata(&dep_name, None, repositories, true).await {
+                        run_deps.push(dep_metadata);
+                    }
                 }
             }
             
@@ -2581,8 +2636,16 @@ async fn fetch_packages_from_repos(
                     metadata::depend_kind::DependKind::Specific(dv) => dv.name.clone(),
                     metadata::depend_kind::DependKind::Volatile(n) => n.clone(),
                 };
-                if let Some(dep_metadata) = ProcessedMetaData::get_metadata(&dep_name, None, repositories, true).await {
-                    build_deps.push(dep_metadata);
+                // Skip self-dependencies to prevent infinite loops (e.g., gcc depends on gcc)
+                if dep_name == name {
+                    continue;
+                }
+                // Only process dependencies we haven't seen yet - strict check to prevent loops
+                if !visited.contains(&dep_name) {
+                    visited.insert(dep_name.clone());
+                    if let Some(dep_metadata) = ProcessedMetaData::get_metadata(&dep_name, None, repositories, true).await {
+                        build_deps.push(dep_metadata);
+                    }
                 }
             }
             
@@ -2592,15 +2655,63 @@ async fn fetch_packages_from_repos(
                 build_deps,
             });
         } else {
-            println!("[FETCH] WARNING: Package {} not found in repositories!", name);
-            std::io::stdout().flush().unwrap();
+            // Collect detailed error information
+            let mut details = Vec::new();
+            details.push(format!("Searched in {} repository(ies)", repositories.len()));
+            
+            for repo in repositories {
+                if let OriginKind::LocalDir(dir_path) = repo {
+                    let dir = std::path::Path::new(dir_path);
+                    if dir.exists() {
+                        if let Ok(entries) = std::fs::read_dir(dir) {
+                            let mut found_files = Vec::new();
+                            let mut parse_errors = Vec::new();
+                            let prefix = format!("{}-", name);
+                            for entry in entries.flatten() {
+                                if let Some(file_name) = entry.file_name().to_str() {
+                                    if file_name.contains(&name) && !file_name.contains(".src.") {
+                                        found_files.push(file_name.to_string());
+                                        // Try to parse the file to see why it failed
+                                        let file_path = dir.join(file_name);
+                                        if let Some(path_str) = file_path.to_str() {
+                                            match metadata::ProcessedMetaData::get_metadata_from_local_package(path_str).await {
+                                                Ok(_) => {
+                                                    // This shouldn't happen if get_metadata returned None
+                                                    parse_errors.push(format!("{}: Parsed successfully (unexpected)", file_name));
+                                                }
+                                                Err(e) => {
+                                                    parse_errors.push(format!("{}: {}", file_name, e));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if !found_files.is_empty() {
+                                details.push(format!("Found {} matching file(s) in {}: {:?}", found_files.len(), dir_path, found_files));
+                                if !parse_errors.is_empty() {
+                                    for err in parse_errors {
+                                        details.push(format!("  Parse error: {}", err));
+                                    }
+                                }
+                            } else {
+                                details.push(format!("No matching files found in {}", dir_path));
+                            }
+                        }
+                    } else {
+                        details.push(format!("Directory does not exist: {}", dir_path));
+                    }
+                }
+            }
+            
+            missing_packages.push(MissingPackageInfo {
+                name: name.clone(),
+                details,
+            });
         }
     }
     
-    println!("[FETCH] Successfully fetched {} packages", packages.len());
-    std::io::stdout().flush().unwrap();
-    
-    Ok(packages)
+    Ok((packages, missing_packages))
 }
 
 fn setup_live_init(iso_root: &Path, _template: Option<&IsoTemplate>) -> Result<(), String> {

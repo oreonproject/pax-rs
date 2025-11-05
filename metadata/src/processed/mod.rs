@@ -714,12 +714,34 @@ impl ProcessedMetaData {
                 }
                 
                 // Try to find package file matching name and version
-                let possible_files = vec![
+                let mut possible_files = vec![
                     dir.join(format!("{}-{}.pax", self.name, self.version)),
                     dir.join(format!("{}-{}.deb", self.name, self.version)),
                     dir.join(format!("{}-{}.rpm", self.name, self.version)),
                     dir.join(format!("{}_{}.deb", self.name, self.version)),
                 ];
+                
+                // Also try with architecture suffixes (x86_64v3, x86_64v1, x86_64)
+                for arch in &["x86_64v3", "x86_64v1", "x86_64"] {
+                    possible_files.push(dir.join(format!("{}-{}-{}.pax", self.name, self.version, arch)));
+                    possible_files.push(dir.join(format!("{}-{}-{}.deb", self.name, self.version, arch)));
+                    possible_files.push(dir.join(format!("{}-{}-{}.rpm", self.name, self.version, arch)));
+                }
+                
+                // Scan directory for files matching the pattern (in case exact match doesn't work)
+                if let Ok(entries) = std::fs::read_dir(dir) {
+                    let prefix = format!("{}-{}", self.name, self.version);
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                            if file_name.starts_with(&prefix) && 
+                               (file_name.ends_with(".pax") || file_name.ends_with(".deb") || file_name.ends_with(".rpm")) &&
+                               !file_name.contains(".src.") {
+                                possible_files.push(path);
+                            }
+                        }
+                    }
+                }
                 
                 let mut found = false;
                 for package_path in possible_files {
@@ -869,7 +891,9 @@ impl ProcessedMetaData {
         use std::fs;
         use crate::file_tracking::FileManifest;
 
-        println!("Installing pre-built files...");
+        println!("[INSTALL_PREBUILT] Installing pre-built files for {}...", self.name);
+        println!("[INSTALL_PREBUILT] Extract dir: {}", extract_dir.display());
+        println!("[INSTALL_PREBUILT] Install root: {}", install_root.display());
 
         let mut manifest = FileManifest::new(
             self.name.clone(),
@@ -877,6 +901,7 @@ impl ProcessedMetaData {
         );
 
         let entries = collect_package_entries(extract_dir)?;
+        println!("[INSTALL_PREBUILT] Found {} entries to install", entries.len());
         let total = entries.len().max(1);
         let mut processed = 0usize;
 
@@ -893,6 +918,10 @@ impl ProcessedMetaData {
                 &relative
             };
             let dest_path = install_root.join(relative_clean);
+            
+            if self.name == "pax-rs" {
+                eprintln!("[INSTALL_PREBUILT] pax-rs: Installing {} -> {}", src_path.display(), dest_path.display());
+            }
 
             if metadata.is_dir() {
                 fs::create_dir_all(&dest_path).map_err(|e| {
@@ -1200,11 +1229,17 @@ impl ProcessedMetaData {
 
         let (has_entries, critical_files, config_files) = Self::collect_payload_from(&temp_dir)?;
 
+        eprintln!("[LOAD_PAX] Package {}: has_entries={}, critical_files={}, install_kind before={:?}", 
+            processed.name, has_entries, critical_files.len(), processed.install_kind);
+
         if has_entries {
             processed.install_kind = ProcessedInstallKind::PreBuilt(PreBuilt {
                 critical: critical_files,
                 configs: config_files,
             });
+            eprintln!("[LOAD_PAX] Changed install_kind to PreBuilt for {}", processed.name);
+        } else {
+            eprintln!("[LOAD_PAX] Package {} has no entries, keeping install_kind as {:?}", processed.name, processed.install_kind);
         }
 
         processed.dependent = false;
@@ -1352,54 +1387,191 @@ impl ProcessedMetaData {
 
     /// Fix common YAML syntax issues in package manifests
     /// Handles unescaped quotes in double-quoted strings
+    /// Normalizes field names to handle both underscore and hyphen formats
     fn fix_yaml_syntax(content: &str) -> String {
         let mut fixed_lines = Vec::new();
         
         for line in content.lines() {
+            let mut fixed_line = line.to_string();
+            
+            // Replace tabs with spaces (YAML requires spaces for indentation)
+            fixed_line = fixed_line.replace('\t', "  ");
+            
+            // Remove trailing semicolons or commas (invalid in YAML)
+            fixed_line = fixed_line.trim_end_matches(';').trim_end_matches(',').to_string();
+            
             // Check if this is a YAML key-value line with a quoted string
-            if let Some(colon_pos) = line.find(':') {
-                let key_part = &line[..colon_pos];
-                let value_part = line[colon_pos + 1..].trim();
+            if let Some(colon_pos) = fixed_line.find(':') {
+                let key_part = &fixed_line[..colon_pos].trim_end();
+                let value_part = fixed_line[colon_pos + 1..].trim();
                 
-                // If the value starts with a double quote, fix inner unescaped quotes
+                // If value is empty, set it to empty string
+                let value_part = if value_part.is_empty() { "\"\"" } else { value_part };
+                
+                // If the line is very long (250+ chars), use block scalar to avoid parsing issues
+                if fixed_line.len() > 250 {
+                    // Use YAML literal block scalar for very long values
+                    if !value_part.starts_with('"') && !value_part.starts_with('\'') && !value_part.starts_with('|') {
+                        fixed_lines.push(format!("{}: |", key_part));
+                        fixed_lines.push(format!("  {}", value_part));
+                        continue;
+                    }
+                }
+                
+                // Check if there are multiple colons or other structural issues
+                let colon_count = fixed_line.matches(':').count();
+                if colon_count > 1 && fixed_line.len() > 100 {
+                    // Multiple colons in a long line - likely a path or URL. Quote the entire value
+                    if !value_part.starts_with('"') && !value_part.starts_with('\'') {
+                        // Escape backslashes first, then quotes
+                        let escaped = value_part.replace('\\', "\\\\").replace('"', "\\\"");
+                        fixed_line = format!("{}: \"{}\"", key_part, escaped);
+                        fixed_lines.push(fixed_line);
+                        continue;
+                    }
+                }
+                
+                // If value contains special YAML characters and isn't quoted, quote it
+                let needs_quoting = !value_part.starts_with('"') && !value_part.starts_with('\'') && 
+                    (value_part.contains(':') || value_part.contains('{') || value_part.contains('}') || 
+                     value_part.contains('[') || value_part.contains(']') || value_part.contains('#') ||
+                     value_part.contains('|') || value_part.contains('&') || value_part.contains('*'));
+                
+                if needs_quoting && !value_part.is_empty() {
+                    // Quote the value to prevent parsing issues - escape backslashes first, then quotes
+                    let escaped = value_part.replace('\\', "\\\\").replace('"', "\\\"");
+                    fixed_line = format!("{}: \"{}\"", key_part, escaped);
+                    fixed_lines.push(fixed_line);
+                    continue;
+                }
+                
+                // Check for unclosed quotes (line ends with quote but doesn't start with one)
+                if !value_part.starts_with('"') && value_part.ends_with('"') {
+                    // Might be a parsing issue - quote the whole thing
+                    let cleaned = value_part.trim_end_matches('"');
+                    let escaped = cleaned.replace('\\', "\\\\").replace('"', "\\\"");
+                    fixed_line = format!("{}: \"{}\"", key_part, escaped);
+                    fixed_lines.push(fixed_line);
+                    continue;
+                }
+                
+                // If the value starts with a double quote, fix issues
                 if value_part.starts_with('"') && !value_part.starts_with("\"\"") {
-                    // Find where the string should actually end
-                    // Strategy: Use single quotes for the outer string to preserve inner double quotes
-                    if value_part.len() > 1 {
-                        // Check if there's an unescaped quote inside
-                        let inner = &value_part[1..]; // Skip first quote
+                    // Extract the quoted content
+                    if value_part.len() > 1 && value_part.ends_with('"') {
+                        let quoted_content = &value_part[1..value_part.len()-1];
                         
-                        // If we find an unescaped quote before the end, we need to fix it
-                        let mut quote_positions = Vec::new();
-                        let mut chars: Vec<char> = inner.chars().collect();
+                        // If the quoted string is very long (200+ chars), use block scalar instead
+                        // This avoids parsing issues with long strings containing special characters
+                        if quoted_content.len() > 200 {
+                            fixed_lines.push(format!("{}: |", key_part));
+                            fixed_lines.push(format!("  {}", quoted_content));
+                            continue;
+                        }
+                        let mut fixed_content = String::new();
+                        let mut chars: Vec<char> = quoted_content.chars().collect();
                         let mut i = 0;
+                        let mut needs_fix = false;
                         
+                        // Check for invalid escape sequences and fix them
                         while i < chars.len() {
-                            if chars[i] == '"' && (i == 0 || chars[i-1] != '\\') {
-                                quote_positions.push(i);
+                            if chars[i] == '\\' && i + 1 < chars.len() {
+                                let next_char = chars[i + 1];
+                                
+                                // Check if it's the start of a valid escape
+                                let is_valid = match next_char {
+                                    'n' | 'r' | 't' | '\\' | '"' | '\'' | '0' | 'a' | 'b' | 'e' | 'f' | 'v' => true,
+                                    'x' if i + 3 < chars.len() => {
+                                        // \xHH - hex escape
+                                        chars[i + 2].is_ascii_hexdigit() && chars[i + 3].is_ascii_hexdigit()
+                                    },
+                                    'u' if i + 5 < chars.len() => {
+                                        // \uHHHH - unicode escape
+                                        (i + 2..i + 6).all(|j| j < chars.len() && chars[j].is_ascii_hexdigit())
+                                    },
+                                    'U' if i + 9 < chars.len() => {
+                                        // \UHHHHHHHH - unicode escape
+                                        (i + 2..i + 10).all(|j| j < chars.len() && chars[j].is_ascii_hexdigit())
+                                    },
+                                    _ => false,
+                                };
+                                
+                                if !is_valid {
+                                    // Invalid escape - remove the backslash, keep the character
+                                    fixed_content.push(next_char);
+                                    i += 2;
+                                    needs_fix = true;
+                                    continue;
+                                } else {
+                                    // Valid escape - keep it
+                                    fixed_content.push(chars[i]); // backslash
+                                    fixed_content.push(chars[i + 1]); // escape char
+                                    i += 2;
+                                    // Handle multi-character escapes
+                                    match next_char {
+                                        'x' if i + 1 < chars.len() => {
+                                            // Already advanced past \x, now add the two hex digits
+                                            fixed_content.push(chars[i]);
+                                            fixed_content.push(chars[i + 1]);
+                                            i += 2;
+                                        },
+                                        'u' if i + 3 < chars.len() => {
+                                            // Already advanced past \u, now add the four hex digits
+                                            for j in 0..4 {
+                                                if i + j < chars.len() {
+                                                    fixed_content.push(chars[i + j]);
+                                                }
+                                            }
+                                            i += 4;
+                                        },
+                                        'U' if i + 7 < chars.len() => {
+                                            // Already advanced past \U, now add the eight hex digits
+                                            for j in 0..8 {
+                                                if i + j < chars.len() {
+                                                    fixed_content.push(chars[i + j]);
+                                                }
+                                            }
+                                            i += 8;
+                                        },
+                                        _ => {}
+                                    }
+                                    continue;
+                                }
                             }
+                            fixed_content.push(chars[i]);
                             i += 1;
                         }
                         
-                        // If there's more than one quote (the ending quote), we have inner quotes
-                        if quote_positions.len() > 1 {
-                            // Use YAML literal block scalar for complex strings
-                            fixed_lines.push(format!("{}: |", key_part));
-                            // Remove the surrounding quotes and add as literal
-                            let content_without_quotes = if value_part.ends_with('"') {
-                                &value_part[1..value_part.len()-1]
-                            } else {
-                                &value_part[1..]
-                            };
-                            fixed_lines.push(format!("  {}", content_without_quotes));
-                            continue;
+                        if needs_fix {
+                            // Use the fixed content with quotes
+                            fixed_line = format!("{}: \"{}\"", key_part, fixed_content);
+                        } else {
+                            // Check for unescaped quotes inside
+                            let inner = &value_part[1..value_part.len()-1];
+                            let mut quote_positions = Vec::new();
+                            let mut inner_chars: Vec<char> = inner.chars().collect();
+                            let mut j = 0;
+                            
+                            while j < inner_chars.len() {
+                                if inner_chars[j] == '"' && (j == 0 || inner_chars[j-1] != '\\') {
+                                    quote_positions.push(j);
+                                }
+                                j += 1;
+                            }
+                            
+                            // If there's more than one quote (the ending quote), we have inner quotes
+                            if quote_positions.len() > 1 {
+                                // Use YAML literal block scalar for complex strings
+                                fixed_lines.push(format!("{}: |", key_part));
+                                fixed_lines.push(format!("  {}", inner));
+                                continue;
+                            }
                         }
                     }
                 }
             }
             
-            // No fix needed, keep original line
-            fixed_lines.push(line.to_string());
+            fixed_lines.push(fixed_line);
         }
         
         fixed_lines.join("\n")
@@ -1808,18 +1980,19 @@ impl ProcessedMetaData {
                         // Scan local directory for package files (.pax, .deb, .rpm)
                         let dir = Path::new(dir_path);
                         if !dir.exists() || !dir.is_dir() {
-                            eprintln!("[LOCALDIR] Directory does not exist or is not a directory: {}", dir_path);
+                            println!("[LOCALDIR] Directory does not exist or is not a directory: {}", dir_path);
                             None
                         } else {
-                            eprintln!("[LOCALDIR] Scanning directory {} for package {}", dir_path, app);
+                            let app_trimmed = app.trim();
+                            println!("[LOCALDIR] Scanning directory {} for package '{}'", dir_path, app_trimmed);
                             // Try to find package files matching the name
                             let possible_files = if let Some(version) = version {
                                 vec![
-                                    dir.join(format!("{}-{}.pax", app, version)),
-                                    dir.join(format!("{}-{}.deb", app, version)),
-                                    dir.join(format!("{}-{}.rpm", app, version)),
-                                    dir.join(format!("{}_{}.deb", app, version)),
-                                    dir.join(format!("{}-{}-{}.rpm", app, version, "x86_64")),
+                                    dir.join(format!("{}-{}.pax", app_trimmed, version)),
+                                    dir.join(format!("{}-{}.deb", app_trimmed, version)),
+                                    dir.join(format!("{}-{}.rpm", app_trimmed, version)),
+                                    dir.join(format!("{}_{}.deb", app_trimmed, version)),
+                                    dir.join(format!("{}-{}-{}.rpm", app_trimmed, version, "x86_64")),
                                 ]
                             } else {
                                 // For latest version, scan all files and pick the one matching the name
@@ -1835,7 +2008,7 @@ impl ProcessedMetaData {
                                             all_files.push(file_name.to_string());
                                             // Check if it matches the package name (must start with package name followed by -)
                                             // Exclude .src.pax files (source packages)
-                                            let prefix = format!("{}-", app);
+                                            let prefix = format!("{}-", app_trimmed);
                                             if !file_name.contains(".src.") &&
                                                ((file_name.starts_with(&prefix) && file_name.ends_with(".pax")) ||
                                                 (file_name.starts_with(&prefix) && file_name.ends_with(".deb")) ||
@@ -1843,21 +2016,21 @@ impl ProcessedMetaData {
                                                 // Prioritize by architecture
                                                 if file_name.contains("x86_64v3") {
                                                     candidates_v3.push(path.clone());
-                                                    eprintln!("[LOCALDIR] Found x86_64v3 candidate: {}", file_name);
+                                                    println!("[LOCALDIR] Found x86_64v3 candidate: {}", file_name);
                                                 } else if file_name.contains("x86_64v1") {
                                                     candidates_v1.push(path.clone());
-                                                    eprintln!("[LOCALDIR] Found x86_64v1 candidate: {}", file_name);
+                                                    println!("[LOCALDIR] Found x86_64v1 candidate: {}", file_name);
                                                 } else {
                                                     candidates_other.push(path.clone());
-                                                    eprintln!("[LOCALDIR] Found other candidate: {}", file_name);
+                                                    println!("[LOCALDIR] Found other candidate: {}", file_name);
                                                 }
                                             }
                                         }
                                     }
                                 }
-                                eprintln!("[LOCALDIR] All files in directory: {:?}", all_files);
-                                eprintln!("[LOCALDIR] Looking for packages starting with '{}-'", app);
-                                eprintln!("[LOCALDIR] Found {} x86_64v3 candidate(s), {} x86_64v1 candidate(s), {} other candidate(s)", 
+                                println!("[LOCALDIR] All files in directory: {:?}", all_files);
+                                println!("[LOCALDIR] Looking for packages starting with '{}-'", app_trimmed);
+                                println!("[LOCALDIR] Found {} x86_64v3 candidate(s), {} x86_64v1 candidate(s), {} other candidate(s)", 
                                     candidates_v3.len(), candidates_v1.len(), candidates_other.len());
                                 // Prefer v3, then v1, then others
                                 if !candidates_v3.is_empty() {
@@ -1870,28 +2043,36 @@ impl ProcessedMetaData {
                             };
                             
                             let mut found_metadata = None;
+                            let num_candidates = possible_files.len();
+                            println!("[LOCALDIR] Searching for '{}' in {} - found {} candidate file(s)", app_trimmed, dir_path, num_candidates);
                             for package_path in possible_files {
-                                eprintln!("[LOCALDIR] Trying: {}", package_path.display());
+                                println!("[LOCALDIR] Trying: {}", package_path.display());
                                 if package_path.exists() {
-                                    eprintln!("[LOCALDIR] File exists, attempting to parse metadata...");
+                                    println!("[LOCALDIR] File exists, attempting to parse metadata...");
                                     if let Some(path_str) = package_path.to_str() {
                                         match Self::get_metadata_from_local_package(path_str).await {
                                             Ok(processed) => {
-                                                eprintln!("[LOCALDIR] Successfully parsed package: {} {}", processed.name, processed.version);
+                                                println!("[LOCALDIR] Successfully parsed package: {} {}", processed.name, processed.version);
                                                 found_metadata = Some(processed);
                                                 break;
                                             }
                                             Err(e) => {
-                                                eprintln!("[LOCALDIR] Failed to parse package {}: {}", package_path.display(), e);
+                                                println!("[LOCALDIR] ERROR: Failed to parse package {}: {}", package_path.display(), e);
+                                                eprintln!("[LOCALDIR] ERROR: Failed to parse package {}: {}", package_path.display(), e);
                                             }
                                         }
+                                    } else {
+                                        println!("[LOCALDIR] ERROR: Cannot convert path to string: {}", package_path.display());
                                     }
                                 } else {
-                                    eprintln!("[LOCALDIR] File does not exist: {}", package_path.display());
+                                    println!("[LOCALDIR] File does not exist: {}", package_path.display());
                                 }
                             }
                             if found_metadata.is_none() {
-                                eprintln!("[LOCALDIR] No package found for {} in {}", app, dir_path);
+                                println!("[LOCALDIR] ERROR: No package found for '{}' in {} after checking {} file(s)", app_trimmed, dir_path, num_candidates);
+                                eprintln!("[LOCALDIR] ERROR: No package found for '{}' in {} after checking {} file(s)", app_trimmed, dir_path, num_candidates);
+                            } else {
+                                println!("[LOCALDIR] SUCCESS: Found package '{}' in {}", app_trimmed, dir_path);
                             }
                             found_metadata
                         }
