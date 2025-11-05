@@ -1,3 +1,1 @@
-# PAX Package Manager
-
-work in progress
+readme coming soon
