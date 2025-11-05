@@ -1,5 +1,6 @@
 /target
 /result
-/ .cache
+/.cache
 /.vscode
 /.idea
+*.pax

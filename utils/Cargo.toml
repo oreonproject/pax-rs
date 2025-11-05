@@ -1,0 +1,11 @@
+[package]
+name = "utils"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+flags.workspace = true
+nix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+statebox.workspace = true

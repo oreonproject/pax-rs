@@ -1,0 +1,46 @@
+packages:
+  - apparmor
+  - bash
+  - busybox
+  - coreutils
+  - e2fsprogs
+  - file
+  - glibc
+  - grub
+  - iproute2
+  - kbd
+  - kmod
+  - linux-kernel
+  - ncurses
+  - pkgconf
+  - procps-ng
+  - readline
+  - shadow
+  - systemd
+  - util-linux
+  - libsepol
+  - libselinux
+  - libcap
+  - libxcrypt
+  - expat
+  - dbus
+  - attr
+  - gzip
+  - pam
+  - tar
+  - which
+  - acl
+  - less
+  - sudo
+  - openssl
+  - pcre2
+  - xz
+  - pax-rs
+  - gcc
+
+repositories:
+  - type: local
+    path: /home/blester/packages/x86_64v3
+
+config:
+  hostname: oreon
