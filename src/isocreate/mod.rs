@@ -450,6 +450,26 @@ fn build_iso(
             println!("===== COMPLETED PACKAGE: {} ======", package.metadata.name);
             std::io::stdout().flush().unwrap();
         }
+        
+        // Mark all installed packages as installed in the ISO
+        println!("Marking all installed packages as installed in ISO...");
+        let installed_dir = rootfs_dir.join("etc/pax/installed");
+        fs::create_dir_all(&installed_dir)
+            .map_err(|e| format!("Failed to create /etc/pax/installed directory: {}", e))?;
+        
+        // Mark all packages that were installed
+        for package in &remote_data {
+            let package_file = installed_dir.join(format!("{}.json", package.metadata.name));
+            if !package_file.exists() {
+                // Create installed metadata for this package
+                let installed_meta = package.metadata.to_installed_with_parent(None);
+                installed_meta.write(&package_file)
+                    .map_err(|e| format!("Failed to write installed metadata for {}: {}", package.metadata.name, e))?;
+                println!("  Marked {} as installed", package.metadata.name);
+            }
+        }
+        
+        println!("Marked {} packages as installed in ISO", remote_data.len());
     }
     
     // Create /etc/ld.so.conf to tell the dynamic linker where to find systemd libraries
@@ -896,7 +916,7 @@ echo "Type 'poweroff' to shutdown or 'reboot' to restart."
     
     // Set up bootloader (GRUB) - update to load from squashfs
     println!("Setting up bootloader...");
-    setup_grub(&iso_root)?;
+    let efi_available = setup_grub(&iso_root)?;
     
     // Create initrd/init script for live environment
     setup_live_init(&iso_root, template)?;
@@ -908,7 +928,7 @@ echo "Type 'poweroff' to shutdown or 'reboot' to restart."
     
     // Create ISO
     println!("Creating ISO image...");
-    create_iso_image(&iso_root, output_path)?;
+    create_iso_image(&iso_root, output_path, efi_available)?;
     
     Ok(missing_packages_summary)
 }
@@ -1390,19 +1410,51 @@ fn find_file_starting_with(root: &Path, prefix: &str) -> Result<Option<PathBuf>,
     Ok(None)
 }
 
-fn setup_grub(iso_root: &Path) -> Result<(), String> {
+fn setup_grub(iso_root: &Path) -> Result<bool, String> {
     fs::create_dir_all(iso_root.join("boot/grub"))
         .map_err(|e| format!("Failed to create grub directory: {}", e))?;
-    
+
+    // Copy GRUB modules for BIOS boot
+    let grub_bios_dir = find_grub_lib_dir("i386-pc")
+        .map_err(|e| format!("Failed to find GRUB BIOS directory: {}", e))?;
+
+    println!("Copying GRUB BIOS modules from {}...", grub_bios_dir);
+    copy_dir_recursive(&Path::new(&grub_bios_dir), &iso_root.join("boot/grub/i386-pc"))
+        .map_err(|e| format!("Failed to copy GRUB BIOS modules: {}", e))?;
+
+    // Copy GRUB modules for EFI if available
+    let efi_available = if let Ok(grub_efi_dir) = find_grub_lib_dir("x86_64-efi") {
+        println!("Copying GRUB EFI modules from {}...", grub_efi_dir);
+        copy_dir_recursive(&Path::new(&grub_efi_dir), &iso_root.join("boot/grub/x86_64-efi"))
+            .map_err(|e| format!("Failed to copy GRUB EFI modules: {}", e))?;
+        true
+    } else {
+        false
+    };
+
     let grub_cfg = iso_root.join("boot/grub/grub.cfg");
     let grub_content = r#"set timeout=5
 set default=0
 
+# Load modules needed to read from ISO filesystems
 insmod all_video
 insmod iso9660
 insmod linux
+insmod initrd
+insmod search
+insmod search_fs_file
+insmod search_label
+insmod search_fs_uuid
+insmod normal
+insmod configfile
 
 terminal_output console
+
+# Search for the ISO by volume label
+search --no-floppy --set=root --label OREON_11
+
+# Set prefix to where GRUB modules are located
+set prefix=($root)/boot/grub
 
 menuentry "Oreon Live" {
     echo "Loading kernel..."
@@ -1412,11 +1464,11 @@ menuentry "Oreon Live" {
     echo "Booting..."
 }
 "#;
-    
+
     fs::write(&grub_cfg, grub_content)
         .map_err(|e| format!("Failed to write grub.cfg: {}", e))?;
-    
-    Ok(())
+
+    Ok(efi_available)
 }
 
 fn setup_kernel_and_initrd(rootfs: &Path, iso_root: &Path) -> Result<(), String> {
@@ -2002,6 +2054,10 @@ if [ -f /mnt/live/rootfs.squashfs ]; then
             mkdir -p /overlay/merged/proc /overlay/merged/sys /overlay/merged/dev /overlay/merged/dev/pts
             mkdir -p /overlay/merged/run /overlay/merged/tmp /overlay/merged/var/log
             
+            # Ensure /etc is writable (critical for pax to create /etc/pax)
+            mkdir -p /overlay/upper/etc
+            chmod 755 /overlay/upper/etc 2>/dev/null || true
+            
             # Mount filesystems in new root
             mount -t proc proc /overlay/merged/proc
             mount -t sysfs sysfs /overlay/merged/sys
@@ -2456,6 +2512,7 @@ echo "Loading kernel modules..."
 modprobe loop 2>/dev/null || echo "loop module already loaded or not needed"
 modprobe squashfs 2>/dev/null || echo "squashfs module already loaded or not needed"
 modprobe isofs 2>/dev/null || echo "isofs module already loaded or not needed"
+modprobe udf 2>/dev/null || echo "udf module already loaded or not needed"
 modprobe overlay 2>/dev/null || echo "overlay module already loaded or not needed"
 modprobe sr_mod 2>/dev/null || echo "sr_mod module already loaded or not needed"
 modprobe cdrom 2>/dev/null || echo "cdrom module already loaded or not needed"
@@ -2464,13 +2521,18 @@ modprobe cdrom 2>/dev/null || echo "cdrom module already loaded or not needed"
 echo "Waiting for CD/DVD device..."
 sleep 3
 
-# Try to mount the CD/ISO
+# Try to mount the CD/ISO - try UDF first (modern), then ISO9660 (fallback)
 mkdir -p /mnt/cdrom
 for device in /dev/sr0 /dev/cdrom /dev/scd0; do
     if [ -b "$device" ]; then
         echo "Trying to mount $device..."
-        if mount -t iso9660 -o ro "$device" /mnt/cdrom 2>/dev/null; then
-            echo "Mounted ISO from $device"
+        # Try UDF first (modern filesystem)
+        if mount -t udf -o ro "$device" /mnt/cdrom 2>/dev/null; then
+            echo "Mounted UDF ISO from $device"
+            break
+        # Fallback to ISO9660 for compatibility
+        elif mount -t iso9660 -o ro "$device" /mnt/cdrom 2>/dev/null; then
+            echo "Mounted ISO9660 ISO from $device"
             break
         fi
     fi
@@ -2782,9 +2844,9 @@ fn apply_template_config(iso_root: &Path, config: &TemplateConfig) -> Result<(),
     Ok(())
 }
 
-fn create_iso_image(iso_root: &Path, output_path: &Path) -> Result<(), String> {
-    // Use grub-mkrescue - this is the standard tool used by most Linux distros
-    // It automatically handles creating boot images and ISO in one step
+fn create_iso_image(iso_root: &Path, output_path: &Path, efi_available: bool) -> Result<(), String> {
+    // Use xorriso directly to create UDF-based ISO with hybrid ISO9660/UDF support
+    // This allows modern UDF filesystem while maintaining boot compatibility
     let check_tool = |tool: &str| -> bool {
         RunCommand::new("/usr/bin/which")
             .arg(tool)
@@ -2792,6 +2854,35 @@ fn create_iso_image(iso_root: &Path, output_path: &Path) -> Result<(), String> {
             .is_ok_and(|o| o.status.success())
     };
     
+    // Find GRUB directory for BIOS
+    let grub_bios_dir = find_grub_lib_dir("i386-pc")?;
+    
+    // Verify boot structure exists
+    let grub_cfg = iso_root.join("boot/grub/grub.cfg");
+    if !grub_cfg.exists() {
+        return Err(format!("grub.cfg not found at {}. Boot configuration is required for bootable ISO.", grub_cfg.display()));
+    }
+    
+    let kernel_path = iso_root.join("boot/vmlinuz");
+    let initrd_path = iso_root.join("boot/initrd.img");
+    
+    if !kernel_path.exists() {
+        return Err(format!("Kernel not found at {}. Bootable ISO requires a kernel.", kernel_path.display()));
+    }
+    
+    if !initrd_path.exists() {
+        return Err(format!("Initrd not found at {}. Bootable ISO requires an initrd.", initrd_path.display()));
+    }
+    
+    // Remove output file if it exists
+    if output_path.exists() {
+        fs::remove_file(output_path)
+            .map_err(|e| format!("Failed to remove existing ISO file: {}", e))?;
+    }
+    
+    println!("Creating bootable ISO with grub-mkrescue...");
+
+    // Use grub-mkrescue - it knows how to operate xorriso correctly for GRUB boot
     let grub_tool = if check_tool("grub-mkrescue") {
         "grub-mkrescue"
     } else if check_tool("grub2-mkrescue") {
@@ -2799,45 +2890,78 @@ fn create_iso_image(iso_root: &Path, output_path: &Path) -> Result<(), String> {
     } else {
         return Err("grub-mkrescue not found. Please install grub2-tools.".to_string());
     };
-    
-    println!("Using {} to create bootable ISO...", grub_tool);
-    
-    // grub-mkrescue automatically creates boot images and ISO
-    // It expects the ISO root directory as the last argument
+
     let mut cmd = RunCommand::new(grub_tool);
     cmd.arg("-o")
-        .arg(output_path)
-        .arg("-v")
-        .arg(format!("--directory={}", find_grub_lib_dir()?))
-        .arg(iso_root);
+        .arg(output_path);
+
+    // Add source directory
+    cmd.arg(iso_root);
+
+    // Pass options to xorriso for proper boot setup
+    // Note: grub-mkrescue passes these to xorriso after the source directory
+    cmd.arg("-iso-level")
+        .arg("3")
+        .arg("-full-iso9660-filenames")
+        .arg("-volid")
+        .arg("OREON_11")
+        .arg("-J")
+        .arg("-R");
     
     let output = cmd.output()
         .map_err(|e| format!("Failed to execute {}: {}", grub_tool, e))?;
     
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    
+    if !stdout.is_empty() {
+        println!("{} stdout: {}", grub_tool, stdout);
+    }
+    if !stderr.is_empty() && !stderr.contains("UPDATE=") {
+        eprintln!("{} stderr: {}", grub_tool, stderr);
+    }
+    
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
         return Err(format!("ISO creation failed:\nstdout: {}\nstderr: {}", stdout, stderr));
     }
+    
+    // Verify ISO was created
+    if !output_path.exists() {
+        return Err(format!("ISO creation reported success but file {} does not exist", output_path.display()));
+    }
+    
+    println!("ISO created successfully: {} (BIOS{} boot)",
+        output_path.display(),
+        if efi_available { "+UEFI" } else { "" });
     
     Ok(())
 }
 
-fn find_grub_lib_dir() -> Result<String, String> {
+fn find_grub_lib_dir(arch: &str) -> Result<String, String> {
     // Try common GRUB library directories
     let possible_dirs = vec![
-        "/usr/lib/grub/i386-pc",
-        "/usr/lib/grub2/i386-pc",
-        "/usr/share/grub/i386-pc",
-        "/usr/share/grub2/i386-pc",
+        format!("/usr/lib/grub/{}", arch),
+        format!("/usr/lib/grub2/{}", arch),
+        format!("/usr/share/grub/{}", arch),
+        format!("/usr/share/grub2/{}", arch),
     ];
     
     for dir in possible_dirs {
-        if Path::new(dir).exists() {
-            return Ok(dir.to_string());
+        if Path::new(&dir).exists() {
+            return Ok(dir);
         }
     }
     
-    Err("Could not find GRUB library directory. Please install grub2-pc or grub-pc.".to_string())
+    // Provide helpful error message
+    let package_name = if arch == "x86_64-efi" {
+        "grub2-efi-x64-modules"
+    } else if arch == "i386-pc" {
+        "grub2-pc"
+    } else {
+        &format!("grub2-{}", arch.replace("-", "_"))
+    };
+    
+    Err(format!("Could not find GRUB {} library directory. Please install {} (e.g., 'sudo dnf install {}' or 'sudo apt install {}').", 
+        arch, package_name, package_name, package_name))
 }
 

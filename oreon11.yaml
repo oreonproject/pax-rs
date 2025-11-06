@@ -36,7 +36,17 @@ packages:
   - pcre2
   - xz
   - pax-rs
+  - pax-config
+  - grub2-efi-x64
+  - grub2-pc
+  - shim-x64
   - gcc
+  - zlib
+  - curl
+  - wget
+  - libunistring
+  - libnghttp2
+  - libidn2
 
 repositories:
   - type: local
