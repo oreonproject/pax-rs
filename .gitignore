@@ -4,3 +4,7 @@
 /.vscode
 /.idea
 *.pax
+## AppArmor sample payloads
+etc/apparmor/
+lib/apparmor/
+usr/

@@ -1,3 +1,0 @@
-# Policy group for applications installed in /opt
-/opt/@{APPNAME}/ r,
-/opt/@{APPNAME}/** mrk,
