@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
+use reqwest::Url;
 use settings::OriginKind;
+use std::fmt;
 use std::hash::Hash;
 use std::{
     collections::HashSet,
@@ -8,12 +11,13 @@ use std::{
     os::unix::fs::{PermissionsExt, symlink},
     path::{Path, PathBuf},
     process::Command as RunCommand,
+    sync::OnceLock,
 };
 use tokio::runtime::Runtime;
-use utils::{err, get_update_dir, tmpfile};
+use utils::{err, get_update_dir, tmpfile, Range, VerReq, Version};
 
 use crate::{
-    depend_kind::DependKind, InstalledInstallKind, InstalledMetaData, MetaDataKind,
+    depend_kind::DependKind, DepVer, InstalledInstallKind, InstalledMetaData, MetaDataKind,
     Specific, installed::InstalledCompilable, parsers::pax::RawPax, parsers::github::RawGithub, parsers::apt::RawApt,
 };
 
@@ -42,10 +46,6 @@ where
             })?;
             let path = entry.path();
 
-            if path == root.join("manifest.yaml") {
-                continue;
-            }
-
             let metadata = fs::symlink_metadata(&path).map_err(|e| {
                 format!("Failed to inspect {}: {}", path.display(), e)
             })?;
@@ -56,6 +56,10 @@ where
                     path.display()
                 )
             })?;
+
+            if relative == Path::new("manifest.yaml") || relative.starts_with("pax-metadata") {
+                continue;
+            }
 
             visitor(&path, relative, &metadata)?;
 
@@ -320,6 +324,25 @@ pub struct ProcessedMetaData {
 }
 
 impl ProcessedMetaData {
+    fn debug_enabled() -> bool {
+        static DEBUG: OnceLock<bool> = OnceLock::new();
+        *DEBUG.get_or_init(|| {
+            std::env::var("PAX_DEBUG_FETCH")
+                .map(|v| {
+                    let v = v.trim().to_ascii_lowercase();
+                    matches!(v.as_str(), "1" | "true" | "yes" | "on")
+                })
+                .unwrap_or(false)
+        })
+    }
+
+    fn debug_log(args: fmt::Arguments<'_>) {
+        if Self::debug_enabled() {
+            eprintln!("{}", args);
+        }
+    }
+
+
     pub fn to_installed_with_parent(&self, installed_by: Option<String>) -> InstalledMetaData {
         InstalledMetaData {
             name: self.name.clone(),
@@ -1165,11 +1188,18 @@ impl ProcessedMetaData {
             "pax" => Self::load_local_pax(path),
             "deb" => Self::load_local_deb(path),
             "rpm" => Self::load_local_rpm(path),
-            other => err!(
-                "Unsupported package format `{}` for {}",
-                other,
-                path.display()
-            ),
+            "" => match Self::load_local_pax(path) {
+                Ok(metadata) => Ok(metadata),
+                Err(err) => err!("{}", err),
+            },
+            other => match Self::load_local_pax(path) {
+                Ok(metadata) => Ok(metadata),
+                Err(_) => err!(
+                    "Unsupported package format `{}` for {}",
+                    other,
+                    path.display()
+                ),
+            },
         }
     }
 
@@ -1193,39 +1223,40 @@ impl ProcessedMetaData {
 
         let manifest_path = temp_dir.join("manifest.yaml");
         let sidecar_path = path.with_extension("pax.meta");
+        let metadata_dir = temp_dir.join("pax-metadata");
 
-        let manifest_content = if manifest_path.exists() {
-            fs::read_to_string(&manifest_path)
-                .map_err(|_| "Failed to read manifest.yaml")?
-        } else if sidecar_path.exists() {
-            fs::read_to_string(&sidecar_path).map_err(|_| {
-                format!(
-                    "Failed to read metadata sidecar: {}",
-                    sidecar_path.display()
-                )
-            })?
+        let mut processed = if metadata_dir.is_dir() {
+            Self::parse_pax_metadata_dir(&metadata_dir)?
         } else {
-            let _ = fs::remove_dir_all(&temp_dir);
-            return err!(
-                "No package metadata found for {}. Expected manifest.yaml in archive or {}",
-                path.display(),
-                sidecar_path.display()
-            );
+            let manifest_content = if manifest_path.exists() {
+                fs::read_to_string(&manifest_path)
+                    .map_err(|_| "Failed to read manifest.yaml")?
+            } else if sidecar_path.exists() {
+                fs::read_to_string(&sidecar_path).map_err(|_| {
+                    format!(
+                        "Failed to read metadata sidecar: {}",
+                        sidecar_path.display()
+                    )
+                })?
+            } else {
+                let _ = fs::remove_dir_all(&temp_dir);
+                return err!(
+                    "No package metadata found for {}. Expected manifest.yaml, pax-metadata directory, or sidecar {}",
+                    path.display(),
+                    sidecar_path.display()
+                );
+            };
+
+            // Fix common YAML issues in manifests (malformed quotes, etc.)
+            let fixed_manifest = Self::fix_yaml_syntax(&manifest_content);
+
+            let raw_pax = serde_norway::from_str::<RawPax>(&fixed_manifest)
+                .map_err(|e| format!("Failed to parse manifest.yaml as PAX format: {}", e))?;
+
+            raw_pax
+                .process()
+                .ok_or("Failed to process PAX metadata")?
         };
-
-        // Fix common YAML issues in manifests (malformed quotes, etc.)
-        let fixed_manifest = Self::fix_yaml_syntax(&manifest_content);
-
-        let raw_pax = serde_norway::from_str::<RawPax>(&fixed_manifest)
-            .map_err(|e| format!("Failed to parse manifest.yaml as PAX format: {}", e))?;
-
-        // Note: We don't verify the embedded hash because the manifest itself contains the hash,
-        // creating a circular dependency. The hash in manifest.yaml is informational only.
-        // For verification of packages without embedded manifests, see the sidecar verification logic.
-
-        let mut processed = raw_pax
-            .process()
-            .ok_or("Failed to process PAX metadata")?;
 
         let (has_entries, critical_files, config_files) = Self::collect_payload_from(&temp_dir)?;
 
@@ -1244,10 +1275,368 @@ impl ProcessedMetaData {
 
         processed.dependent = false;
         processed.origin = OriginKind::Pax(path.to_string_lossy().to_string());
+        if processed.hash.is_empty() || processed.hash == "unknown" {
+            processed.hash = crate::file_tracking::calculate_file_checksum(path).unwrap_or_default();
+        }
 
         let _ = fs::remove_dir_all(&temp_dir);
 
         Ok(processed)
+    }
+
+    fn parse_pax_metadata_dir(metadata_dir: &Path) -> Result<Self, String> {
+        let yaml_path = metadata_dir.join("metadata.yaml");
+        let json_path = metadata_dir.join("metadata.json");
+
+        let (metadata_value, source_path) = if yaml_path.exists() {
+            let content = fs::read_to_string(&yaml_path)
+                .map_err(|e| format!("Failed to read {}: {}", yaml_path.display(), e))?;
+            let value: JsonValue = serde_yaml::from_str(&content)
+                .map_err(|e| format!("Failed to parse {}: {}", yaml_path.display(), e))?;
+            (value, yaml_path.display().to_string())
+        } else if json_path.exists() {
+            let content = fs::read_to_string(&json_path)
+                .map_err(|e| format!("Failed to read {}: {}", json_path.display(), e))?;
+            let value: JsonValue = serde_json::from_str(&content)
+                .map_err(|e| format!("Failed to parse {}: {}", json_path.display(), e))?;
+            (value, json_path.display().to_string())
+        } else {
+            return err!(
+                "No metadata.yaml or metadata.json found in {}",
+                metadata_dir.display()
+            );
+        };
+
+        let package = metadata_value.get("package").ok_or_else(|| {
+            format!(
+                "Missing `package` section in {}",
+                source_path
+            )
+        })?;
+
+        let name = package
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("Missing package.name in {}", source_path))?
+            .trim()
+            .to_string();
+
+        let version = package
+            .get("version")
+            .and_then(|v| v.as_str())
+            .unwrap_or("0.0.0")
+            .trim()
+            .to_string();
+
+        let release = package
+            .get("release")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string());
+
+        let architecture = package
+            .get("architecture")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string());
+
+        let branch = package
+            .get("branch")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string());
+
+        let target_release = package
+            .get("target_release")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string());
+
+        let mut description = package
+            .get("summary")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                package
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            })
+            .unwrap_or_else(|| format!("{} {}", name, version));
+
+        if let Some(branch) = branch.as_ref() {
+            if !branch.is_empty() && !description.contains(branch) {
+                description = format!("{description} (branch {branch})");
+            }
+        }
+
+        if let Some(target) = target_release.as_ref() {
+            if !target.is_empty() && !description.contains(target) {
+                description = format!("{description} [{target}]");
+            }
+        }
+
+        let runtime_deps = Self::parse_new_metadata_dependencies(
+            metadata_value
+                .pointer("/dependencies/runtime")
+                .or_else(|| metadata_value.pointer("/dependencies/runtime_dependencies"))
+                .or_else(|| metadata_value.pointer("/package/dependencies/runtime"))
+                .or_else(|| metadata_value.pointer("/package/runtime_dependencies")),
+        );
+
+        let build_deps = Self::parse_new_metadata_dependencies(
+            metadata_value
+                .pointer("/dependencies/build")
+                .or_else(|| metadata_value.pointer("/dependencies/build_dependencies"))
+                .or_else(|| metadata_value.pointer("/package/dependencies/build"))
+                .or_else(|| metadata_value.pointer("/package/build_dependencies")),
+        );
+
+        let mut hash = metadata_value
+            .pointer("/artifacts/binary_hash")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+
+        if hash.is_empty() {
+            hash = package
+                .get("hash")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+        }
+
+        let package_type = package
+            .get("type")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .or_else(|| architecture.clone().map(|arch| format!("PAX ({arch})")))
+            .unwrap_or_else(|| "PAX".to_string());
+
+        let mut metadata = ProcessedMetaData {
+            name,
+            kind: MetaDataKind::Pax,
+            description,
+            version,
+            origin: OriginKind::Pax(String::new()),
+            dependent: false,
+            build_dependencies: build_deps,
+            runtime_dependencies: runtime_deps,
+            install_kind: ProcessedInstallKind::PreBuilt(PreBuilt {
+                critical: Vec::new(),
+                configs: Vec::new(),
+            }),
+            hash,
+            package_type,
+            installed: false,
+            dependencies: Vec::new(),
+            dependents: Vec::new(),
+            installed_files: Vec::new(),
+            available_versions: release.into_iter().collect(),
+        };
+
+        if let Some(arch) = architecture {
+            if !arch.is_empty() && !metadata.package_type.contains(&arch) {
+                metadata.package_type = format!("{} - {}", metadata.package_type, arch);
+            }
+        }
+
+        Ok(metadata)
+    }
+
+    fn parse_new_metadata_dependencies(node: Option<&JsonValue>) -> Vec<DependKind> {
+        let mut deps_as_strings = Vec::new();
+
+        if let Some(value) = node {
+            match value {
+                JsonValue::Array(items) => {
+                    for item in items {
+                        match item {
+                            JsonValue::String(s) => {
+                                let trimmed = s.trim();
+                                if !trimmed.is_empty() {
+                                    deps_as_strings.push(trimmed.to_string());
+                                }
+                            }
+                            JsonValue::Object(obj) => {
+                                if let Some(name) = obj
+                                    .get("name")
+                                    .or_else(|| obj.get("package"))
+                                    .and_then(|v| v.as_str())
+                                {
+                                    let constraint = obj
+                                        .get("version_constraint")
+                                        .or_else(|| obj.get("version"))
+                                        .or_else(|| obj.get("constraint"))
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.trim().to_string())
+                                        .unwrap_or_default();
+
+                                    let mut entry = name.trim().to_string();
+                                    if !constraint.is_empty() {
+                                        entry = Self::normalize_dependency_entry(&entry, &constraint);
+                                    }
+
+                                    let is_optional = obj
+                                        .get("optional")
+                                        .and_then(|v| v.as_bool())
+                                        .unwrap_or(false);
+
+                                    if !is_optional && !entry.is_empty() {
+                                        deps_as_strings.push(entry);
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                JsonValue::String(s) => {
+                    let trimmed = s.trim();
+                    if !trimmed.is_empty() {
+                        deps_as_strings.push(trimmed.to_string());
+                    }
+                }
+                JsonValue::Object(obj) => {
+                    if let Some(name) = obj
+                        .get("name")
+                        .or_else(|| obj.get("package"))
+                        .and_then(|v| v.as_str())
+                    {
+                        let constraint = obj
+                            .get("version_constraint")
+                            .or_else(|| obj.get("version"))
+                            .or_else(|| obj.get("constraint"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.trim().to_string())
+                            .unwrap_or_default();
+
+                        let mut entry = name.trim().to_string();
+                        if !constraint.is_empty() {
+                            entry = Self::normalize_dependency_entry(&entry, &constraint);
+                        }
+
+                        if !entry.is_empty() {
+                            deps_as_strings.push(entry);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Self::dependencies_from_strings(deps_as_strings)
+    }
+
+    fn normalize_dependency_entry(name: &str, constraint: &str) -> String {
+        let trimmed = constraint.trim();
+
+        if trimmed.is_empty() {
+            return name.to_string();
+        }
+
+        if trimmed.starts_with(|c: char| matches!(c, '>' | '<' | '=' | '^' | '~')) {
+            format!("{}{}", name, trimmed)
+        } else {
+            format!("{}=={}", name, trimmed)
+        }
+    }
+
+    fn dependencies_from_strings(entries: Vec<String>) -> Vec<DependKind> {
+        let mut result = Vec::new();
+
+        for dep in entries {
+            let trimmed = dep.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            if let Some(vol) = trimmed.strip_prefix('!') {
+                let name = vol.trim();
+                if !name.is_empty() {
+                    result.push(DependKind::Volatile(name.to_string()));
+                }
+                continue;
+            }
+
+            if let Some(index) = trimmed.find(['=', '>', '<', '^', '~']) {
+                let (name_part, ver_part) = trimmed.split_at(index);
+                let name = name_part.trim();
+                let ver = ver_part.trim();
+
+                if name.is_empty() {
+                    continue;
+                }
+
+                if let Some(range) = Self::parse_dependency_range(ver) {
+                    result.push(DependKind::Specific(DepVer {
+                        name: name.to_string(),
+                        range,
+                    }));
+                } else {
+                    result.push(DependKind::Latest(name.to_string()));
+                }
+            } else {
+                result.push(DependKind::Latest(trimmed.to_string()));
+            }
+        }
+
+        result
+    }
+
+    fn parse_dependency_range(ver: &str) -> Option<Range> {
+        let mut lower = VerReq::NoBound;
+        let mut upper = VerReq::NoBound;
+
+        let ver = ver.trim();
+
+        if ver.is_empty() {
+            return Some(Range {
+                lower: VerReq::NoBound,
+                upper: VerReq::NoBound,
+            });
+        }
+
+        if let Some(ver) = ver.strip_prefix(">>") {
+            lower = VerReq::Gt(Version::parse(ver.trim()).ok()?);
+        } else if let Some(ver) = ver.strip_prefix(">=") {
+            lower = VerReq::Ge(Version::parse(ver.trim()).ok()?);
+        } else if let Some(ver) = ver.strip_prefix(">") {
+            lower = VerReq::Gt(Version::parse(ver.trim()).ok()?);
+        } else if let Some(ver) = ver.strip_prefix("==") {
+            let parsed_ver = Version::parse(ver.trim()).ok()?;
+            lower = VerReq::Eq(parsed_ver.clone());
+            upper = VerReq::Eq(parsed_ver);
+        } else if let Some(ver) = ver.strip_prefix("=") {
+            let parsed_ver = Version::parse(ver.trim()).ok()?;
+            lower = VerReq::Eq(parsed_ver.clone());
+            upper = VerReq::Eq(parsed_ver);
+        } else if let Some(ver) = ver.strip_prefix("<=") {
+            upper = VerReq::Le(Version::parse(ver.trim()).ok()?);
+        } else if let Some(ver) = ver.strip_prefix("<<") {
+            upper = VerReq::Lt(Version::parse(ver.trim()).ok()?);
+        } else if let Some(ver) = ver.strip_prefix("<") {
+            upper = VerReq::Lt(Version::parse(ver.trim()).ok()?);
+        } else if let Some(ver) = ver.strip_prefix("~") {
+            let parsed_ver = Version::parse(ver.trim()).ok()?;
+            lower = VerReq::Ge(parsed_ver.clone());
+            let mut next_major = parsed_ver.clone();
+            next_major.major += 1;
+            next_major.minor = 0;
+            next_major.patch = 0;
+            upper = VerReq::Lt(next_major);
+        } else if let Some(ver) = ver.strip_prefix("^") {
+            let parsed_ver = Version::parse(ver.trim()).ok()?;
+            lower = VerReq::Ge(parsed_ver.clone());
+            let mut next_minor = parsed_ver.clone();
+            next_minor.minor += 1;
+            next_minor.patch = 0;
+            upper = VerReq::Lt(next_minor);
+        } else {
+            let parsed_ver = Version::parse(ver.trim()).ok()?;
+            lower = VerReq::Eq(parsed_ver.clone());
+            upper = VerReq::Eq(parsed_ver);
+        }
+
+        Some(Range { lower, upper })
     }
 
     fn load_local_deb(path: &Path) -> Result<Self, String> {
@@ -1641,6 +2030,255 @@ impl ProcessedMetaData {
             })
             .collect()
     }
+
+    async fn fetch_pax_metadata_from_url(url: &str) -> Option<Self> {
+        Self::debug_log(format_args!("[PAX_FETCH] Trying URL {}", url));
+        let response = match reqwest::get(url).await {
+            Ok(resp) => resp,
+            Err(err) => {
+                Self::debug_log(format_args!(
+                    "[PAX_FETCH] Request failed for {}: {}",
+                    url, err
+                ));
+                return None;
+            }
+        };
+
+        if !response.status().is_success() {
+            Self::debug_log(format_args!(
+                "[PAX_FETCH] URL {} returned status {}",
+                url,
+                response.status()
+            ));
+            return None;
+        }
+
+        let tmpfile_path = tmpfile()?;
+        let bytes = match response.bytes().await {
+            Ok(b) => b,
+            Err(err) => {
+                Self::debug_log(format_args!(
+                    "[PAX_FETCH] Failed to read body from {}: {}",
+                    url, err
+                ));
+                return None;
+            }
+        };
+
+        if std::fs::write(&tmpfile_path, bytes).is_err() {
+            Self::debug_log(format_args!(
+                "[PAX_FETCH] Failed to write downloaded data for {} to {}",
+                url,
+                tmpfile_path.display()
+            ));
+            let _ = std::fs::remove_file(&tmpfile_path);
+            return None;
+        }
+
+        let metadata = if let Some(path_str) = tmpfile_path.to_str() {
+            match Self::get_metadata_from_local_package(path_str).await {
+                Ok(mut processed) => {
+                    Self::debug_log(format_args!(
+                        "[PAX_FETCH] Successfully parsed metadata from {}",
+                        url
+                    ));
+                    processed.origin = OriginKind::Pax(url.to_string());
+                    Some(processed)
+                }
+                Err(err) => {
+                    Self::debug_log(format_args!(
+                        "[PAX_FETCH] Failed to parse metadata from {}: {}",
+                        url, err
+                    ));
+                    None
+                }
+            }
+        } else {
+            Self::debug_log(format_args!(
+                "[PAX_FETCH] Temporary file path for {} was not valid UTF-8",
+                url
+            ));
+            None
+        };
+
+        let _ = std::fs::remove_file(&tmpfile_path);
+        metadata
+    }
+
+    async fn discover_remote_pax_package_url(
+        base: &str,
+        app: &str,
+        version: Option<&str>,
+    ) -> Option<String> {
+        let mut base_with_slash = base.to_string();
+        if !base_with_slash.ends_with('/') {
+            base_with_slash.push('/');
+        }
+
+        let base_url = Url::parse(&base_with_slash).ok()?;
+        Self::debug_log(format_args!(
+            "[PAX_DISCOVER] Fetching index {} for package {}",
+            base_url, app
+        ));
+        let response = match reqwest::get(base_url.clone()).await {
+            Ok(resp) => resp,
+            Err(err) => {
+                Self::debug_log(format_args!(
+                    "[PAX_DISCOVER] Failed to fetch index {}: {}",
+                    base_url, err
+                ));
+                return None;
+            }
+        };
+        if !response.status().is_success() {
+            Self::debug_log(format_args!(
+                "[PAX_DISCOVER] Index {} returned status {}",
+                base_url,
+                response.status()
+            ));
+            return None;
+        }
+
+        let body = match response.text().await {
+            Ok(text) => text,
+            Err(err) => {
+                Self::debug_log(format_args!(
+                    "[PAX_DISCOVER] Failed to read index body {}: {}",
+                    base_url, err
+                ));
+                return None;
+            }
+        };
+        let hrefs = Self::extract_href_candidates(&body, app);
+
+        Self::debug_log(format_args!(
+            "[PAX_DISCOVER] Found {} candidate hrefs for {}",
+            hrefs.len(),
+            app
+        ));
+
+        if hrefs.is_empty() {
+            return None;
+        }
+
+        let arch_hint = base_url
+            .path_segments()
+            .and_then(|mut segments| segments.next_back().map(|s| s.to_string()));
+
+        let mut candidates = Vec::new();
+        for href in hrefs {
+            if let Ok(resolved) = base_url.join(&href) {
+                let url = resolved.to_string();
+                let has_hint = arch_hint
+                    .as_ref()
+                    .map(|hint| url.contains(hint))
+                    .unwrap_or(false);
+                Self::debug_log(format_args!(
+                    "[PAX_DISCOVER] Candidate {} (arch match: {})",
+                    url, has_hint
+                ));
+                candidates.push((url, has_hint));
+            }
+        }
+
+        if candidates.is_empty() {
+            return None;
+        }
+
+        if let Some(ver) = version {
+            let mut best: Option<(String, bool)> = None;
+            for (url, has_hint) in &candidates {
+                if url.contains(ver) {
+                    match &best {
+                        Some((best_url, best_hint)) => {
+                            if Self::better_candidate(*best_hint, best_url, *has_hint, url) {
+                                Self::debug_log(format_args!(
+                                    "[PAX_DISCOVER] Selecting better versioned candidate {}",
+                                    url
+                                ));
+                                best = Some((url.clone(), *has_hint));
+                            }
+                        }
+                        None => {
+                            Self::debug_log(format_args!(
+                                "[PAX_DISCOVER] Selecting first versioned candidate {}",
+                                url
+                            ));
+                            best = Some((url.clone(), *has_hint));
+                        }
+                    }
+                }
+            }
+            return best.map(|(url, _)| url);
+        }
+
+        let mut best: Option<(String, bool)> = None;
+        for (url, has_hint) in &candidates {
+            match &best {
+                Some((best_url, best_hint)) => {
+                    if Self::better_candidate(*best_hint, best_url, *has_hint, url) {
+                        Self::debug_log(format_args!(
+                            "[PAX_DISCOVER] Updating best candidate to {}",
+                            url
+                        ));
+                        best = Some((url.clone(), *has_hint));
+                    }
+                }
+                None => {
+                    Self::debug_log(format_args!(
+                        "[PAX_DISCOVER] Selecting initial candidate {}",
+                        url
+                    ));
+                    best = Some((url.clone(), *has_hint));
+                }
+            }
+        }
+
+        best.map(|(url, _)| url)
+    }
+
+    fn extract_href_candidates(index_html: &str, app: &str) -> Vec<String> {
+        let mut result = Vec::new();
+        let mut remaining = index_html;
+        let needle = "href=\"";
+
+        while let Some(start) = remaining.find(needle) {
+            remaining = &remaining[start + needle.len()..];
+            if let Some(end) = remaining.find('"') {
+                let href = &remaining[..end];
+                remaining = &remaining[end + 1..];
+                let file_name = href
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(href);
+                if file_name.starts_with(app)
+                    && file_name.ends_with(".pax")
+                    && !file_name.contains(".src.")
+                {
+                    result.push(href.to_string());
+                }
+            } else {
+                break;
+            }
+        }
+
+        result
+    }
+
+    fn better_candidate(
+        current_hint: bool,
+        current_url: &str,
+        candidate_hint: bool,
+        candidate_url: &str,
+    ) -> bool {
+        if candidate_hint && !current_hint {
+            true
+        } else if candidate_hint == current_hint && candidate_url > current_url {
+            true
+        } else {
+            false
+        }
+    }
     pub async fn get_metadata(
         app: &str,
         version: Option<&str>,
@@ -1652,60 +2290,40 @@ impl ProcessedMetaData {
         while let (Some(source), None) = (sources.next(), &metadata) {
             match source {
                 OriginKind::Pax(source) => {
-                    // PAX repositories now work by scanning for .pax files
-                    let possible_urls = if let Some(version) = version {
-                        // Try versioned URLs
+                    let base = source.trim_end_matches('/');
+                    let candidate_urls = if let Some(version) = version {
                         vec![
-                            format!("{}/{}-{}.pax", source, app, version),
-                            format!("{}/{}/{}/{}-{}.pax", source, app, version, app, version),
+                            format!("{}/{}-{}.pax", base, app, version),
+                            format!("{}/{}/{}/{}-{}.pax", base, app, version, app, version),
+                            format!("{}/{}/{}-{}.pax", base, version, app, version),
                         ]
-                        } else {
-                        // For latest version, try to discover available versions
-                        // First try simple unversioned name
-                        let simple_url = format!("{}/{}.pax", source, app);
-                        if let Ok(response) = reqwest::get(&simple_url).await {
-                            if response.status().is_success() {
-                                if let Some(tmpfile_path) = tmpfile() {
-                                    if let Ok(bytes) = response.bytes().await {
-                                        if std::fs::write(&tmpfile_path, bytes).is_ok() {
-                                            if let Some(path_str) = tmpfile_path.to_str() {
-                                                if let Ok(mut processed) = Self::get_metadata_from_local_package(path_str).await {
-                                                    processed.origin = OriginKind::Pax(simple_url);
-                                                    metadata = Some(processed);
-                                                    continue;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        
-                        // Try package discovery - attempt common patterns
+                    } else {
                         vec![
-                            format!("{}/packages/{}.pax", source, app),
-                            format!("{}/{}-latest.pax", source, app),
+                            format!("{}/{}.pax", base, app),
+                            format!("{}/packages/{}.pax", base, app),
+                            format!("{}/{}-latest.pax", base, app),
                         ]
                     };
-                    
-                    for url in possible_urls {
-                        // First, try to download and parse the package
-                        if let Ok(response) = reqwest::get(&url).await {
-                            if response.status().is_success() {
-                                if let Some(tmpfile_path) = tmpfile() {
-                                    if let Ok(bytes) = response.bytes().await {
-                                        if std::fs::write(&tmpfile_path, bytes).is_ok() {
-                                            if let Some(path_str) = tmpfile_path.to_str() {
-                                                if let Ok(mut processed) = Self::get_metadata_from_local_package(path_str).await {
-                                                    // Update the origin to point to the actual .pax file URL
-                                                    processed.origin = OriginKind::Pax(url.clone());
-                                                    metadata = Some(processed);
-                                                    break;
-                                                }
+
+                    for url in candidate_urls {
+                        if metadata.is_some() {
+                            break;
                         }
-                                        }
-                                    }
-                                }
+                        if let Some(processed) = Self::fetch_pax_metadata_from_url(&url).await {
+                            metadata = Some(processed);
+                        }
+                    }
+
+                    if metadata.is_none()
+                        && (source.starts_with("http://") || source.starts_with("https://"))
+                    {
+                        if let Some(discovered_url) =
+                            Self::discover_remote_pax_package_url(base, app, version).await
+                        {
+                            if let Some(processed) =
+                                Self::fetch_pax_metadata_from_url(&discovered_url).await
+                            {
+                                metadata = Some(processed);
                             }
                         }
                     }
@@ -1980,11 +2598,17 @@ impl ProcessedMetaData {
                         // Scan local directory for package files (.pax, .deb, .rpm)
                         let dir = Path::new(dir_path);
                         if !dir.exists() || !dir.is_dir() {
-                            println!("[LOCALDIR] Directory does not exist or is not a directory: {}", dir_path);
+                            Self::debug_log(format_args!(
+                                "[LOCALDIR] Directory does not exist or is not a directory: {}",
+                                dir_path
+                            ));
                             None
                         } else {
                             let app_trimmed = app.trim();
-                            println!("[LOCALDIR] Scanning directory {} for package '{}'", dir_path, app_trimmed);
+                            Self::debug_log(format_args!(
+                                "[LOCALDIR] Scanning directory {} for package '{}'",
+                                dir_path, app_trimmed
+                            ));
                             // Try to find package files matching the name
                             let possible_files = if let Some(version) = version {
                                 vec![
@@ -2016,22 +2640,41 @@ impl ProcessedMetaData {
                                                 // Prioritize by architecture
                                                 if file_name.contains("x86_64v3") {
                                                     candidates_v3.push(path.clone());
-                                                    println!("[LOCALDIR] Found x86_64v3 candidate: {}", file_name);
+                                                    Self::debug_log(format_args!(
+                                                        "[LOCALDIR] Found x86_64v3 candidate: {}",
+                                                        file_name
+                                                    ));
                                                 } else if file_name.contains("x86_64v1") {
                                                     candidates_v1.push(path.clone());
-                                                    println!("[LOCALDIR] Found x86_64v1 candidate: {}", file_name);
+                                                    Self::debug_log(format_args!(
+                                                        "[LOCALDIR] Found x86_64v1 candidate: {}",
+                                                        file_name
+                                                    ));
                                                 } else {
                                                     candidates_other.push(path.clone());
-                                                    println!("[LOCALDIR] Found other candidate: {}", file_name);
+                                                    Self::debug_log(format_args!(
+                                                        "[LOCALDIR] Found other candidate: {}",
+                                                        file_name
+                                                    ));
                                                 }
                                             }
                                         }
                                     }
                                 }
-                                println!("[LOCALDIR] All files in directory: {:?}", all_files);
-                                println!("[LOCALDIR] Looking for packages starting with '{}-'", app_trimmed);
-                                println!("[LOCALDIR] Found {} x86_64v3 candidate(s), {} x86_64v1 candidate(s), {} other candidate(s)", 
-                                    candidates_v3.len(), candidates_v1.len(), candidates_other.len());
+                                Self::debug_log(format_args!(
+                                    "[LOCALDIR] All files in directory: {:?}",
+                                    all_files
+                                ));
+                                Self::debug_log(format_args!(
+                                    "[LOCALDIR] Looking for packages starting with '{}-'",
+                                    app_trimmed
+                                ));
+                                Self::debug_log(format_args!(
+                                    "[LOCALDIR] Found {} x86_64v3 candidate(s), {} x86_64v1 candidate(s), {} other candidate(s)",
+                                    candidates_v3.len(),
+                                    candidates_v1.len(),
+                                    candidates_other.len()
+                                ));
                                 // Prefer v3, then v1, then others
                                 if !candidates_v3.is_empty() {
                                     candidates_v3
@@ -2044,35 +2687,60 @@ impl ProcessedMetaData {
                             
                             let mut found_metadata = None;
                             let num_candidates = possible_files.len();
-                            println!("[LOCALDIR] Searching for '{}' in {} - found {} candidate file(s)", app_trimmed, dir_path, num_candidates);
+                            Self::debug_log(format_args!(
+                                "[LOCALDIR] Searching for '{}' in {} - found {} candidate file(s)",
+                                app_trimmed, dir_path, num_candidates
+                            ));
                             for package_path in possible_files {
-                                println!("[LOCALDIR] Trying: {}", package_path.display());
+                                Self::debug_log(format_args!(
+                                    "[LOCALDIR] Trying: {}",
+                                    package_path.display()
+                                ));
                                 if package_path.exists() {
-                                    println!("[LOCALDIR] File exists, attempting to parse metadata...");
+                                    Self::debug_log(format_args!(
+                                        "[LOCALDIR] File exists, attempting to parse metadata..."
+                                    ));
                                     if let Some(path_str) = package_path.to_str() {
                                         match Self::get_metadata_from_local_package(path_str).await {
                                             Ok(processed) => {
-                                                println!("[LOCALDIR] Successfully parsed package: {} {}", processed.name, processed.version);
+                                                Self::debug_log(format_args!(
+                                                    "[LOCALDIR] Successfully parsed package: {} {}",
+                                                    processed.name, processed.version
+                                                ));
                                                 found_metadata = Some(processed);
                                                 break;
                                             }
                                             Err(e) => {
-                                                println!("[LOCALDIR] ERROR: Failed to parse package {}: {}", package_path.display(), e);
-                                                eprintln!("[LOCALDIR] ERROR: Failed to parse package {}: {}", package_path.display(), e);
+                                                Self::debug_log(format_args!(
+                                                    "[LOCALDIR] ERROR: Failed to parse package {}: {}",
+                                                    package_path.display(),
+                                                    e
+                                                ));
                                             }
                                         }
                                     } else {
-                                        println!("[LOCALDIR] ERROR: Cannot convert path to string: {}", package_path.display());
+                                        Self::debug_log(format_args!(
+                                            "[LOCALDIR] ERROR: Cannot convert path to string: {}",
+                                            package_path.display()
+                                        ));
                                     }
                                 } else {
-                                    println!("[LOCALDIR] File does not exist: {}", package_path.display());
+                                    Self::debug_log(format_args!(
+                                        "[LOCALDIR] File does not exist: {}",
+                                        package_path.display()
+                                    ));
                                 }
                             }
                             if found_metadata.is_none() {
-                                println!("[LOCALDIR] ERROR: No package found for '{}' in {} after checking {} file(s)", app_trimmed, dir_path, num_candidates);
-                                eprintln!("[LOCALDIR] ERROR: No package found for '{}' in {} after checking {} file(s)", app_trimmed, dir_path, num_candidates);
+                                Self::debug_log(format_args!(
+                                    "[LOCALDIR] ERROR: No package found for '{}' in {} after checking {} file(s)",
+                                    app_trimmed, dir_path, num_candidates
+                                ));
                             } else {
-                                println!("[LOCALDIR] SUCCESS: Found package '{}' in {}", app_trimmed, dir_path);
+                                Self::debug_log(format_args!(
+                                    "[LOCALDIR] SUCCESS: Found package '{}' in {}",
+                                    app_trimmed, dir_path
+                                ));
                             }
                             found_metadata
                         }
@@ -2438,6 +3106,23 @@ impl ProcessedMetaData {
 }
 
 // Public API functions
+
+fn matches_search(meta: &ProcessedMetaData, query: &str, exact: bool) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    if exact {
+        meta.name.eq_ignore_ascii_case(query)
+    } else {
+        let query_lower = query.to_ascii_lowercase();
+        meta.name.to_ascii_lowercase().contains(&query_lower)
+            || meta
+                .description
+                .to_ascii_lowercase()
+                .contains(&query_lower)
+    }
+}
+
 pub async fn get_packages(
     package_names: Vec<String>,
     _preferred_source: Option<&str>,
@@ -2572,12 +3257,13 @@ pub fn get_local_deps(package_name: &str) -> Result<Vec<String>, String> {
 
 pub async fn search_packages(
     query: &str,
-    _exact_match: bool,
-    _installed_only: bool,
+    exact_match: bool,
+    installed_only: bool,
     _show_deps: bool,
-    _settings: Option<&settings::SettingsYaml>,
+    settings: Option<&settings::SettingsYaml>,
 ) -> Result<Vec<ProcessedMetaData>, String> {
     let mut results = Vec::new();
+    let mut seen = HashSet::new();
     let installed_dir = utils::get_metadata_dir()?;
     
     for entry in std::fs::read_dir(&installed_dir)
@@ -2615,7 +3301,24 @@ pub async fn search_packages(
                     installed_files: Vec::new(), // TODO: implement file tracking
                     available_versions: Vec::new(), // TODO: implement version discovery
                 };
+                seen.insert(processed.name.clone());
                 results.push(processed);
+            }
+        }
+    }
+    
+    if !installed_only {
+        if let Some(settings) = settings {
+            let sources = settings.sources.clone();
+            if let Some(mut remote) =
+                ProcessedMetaData::get_metadata(query, None, &sources, true).await
+            {
+                if !seen.contains(&remote.name) && matches_search(&remote, query, exact_match)
+                {
+                    remote.installed = false;
+                    seen.insert(remote.name.clone());
+                    results.push(remote);
+                }
             }
         }
     }
