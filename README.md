@@ -2,12 +2,14 @@
 Pax is the Package Manager made Specifically for Oreon Linux made with Rust.
 
 ## Installation On Other Distros
-Installing it on other Distros for Testing is pretty easy, you just need to git clone the project
+Installing it on other Distros for Testing is pretty easy, you just need to have git and rust installed on your computer
 ```
 git clone https://github.com/oreonproject/pax-rs.git
 cd pax-rs
-make
+cargo build --release
+target/release/pax --versions
 ```
+and now you have pax! if you want you can add a path in your shell to be able to run it anywhere!
 
 # Structure
 To make the structure of this repo better for readability, each subcommand will be placed in its own folder within the directory of its parent command - e.g. say there are commands `cmd1` and `cmd2`, with `cmd2` having commands `nested1` and `nested2`, the directory structure should look like so:
