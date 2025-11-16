@@ -7,7 +7,7 @@ Installing it on other Distros for Testing is pretty easy, you just need to have
 git clone https://github.com/oreonproject/pax-rs.git
 cd pax-rs
 cargo build --release
-target/release/pax --versions
+target/release/pax --version
 ```
 and now you have pax! if you want you can add a path in your shell to be able to run it anywhere!
 
