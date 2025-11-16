@@ -2,10 +2,11 @@
 Pax is the Package Manager made Specifically for Oreon Linux made with Rust.
 
 ## Installation On Other Distros
-Installing it on other Distros for Testing is very easy, you just need to git clone the project
+Installing it on other Distros for Testing is pretty easy, you just need to git clone the project
 ```
 git clone https://github.com/oreonproject/pax-rs.git
 cd pax-rs
+make
 ```
 
 # Structure
