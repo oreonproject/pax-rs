@@ -32,7 +32,7 @@ To make the structure of this repo better for readability, each subcommand will 
 # Pseudo-docs
 There is no real reason why `command.rs`,`flag.rs`,and`statebox.rs` are used to manage commands instead of the standard [`clap`](https://crates.io/crates/clap) crate, so they may be swapped out in the future. For now, though, `Command` and `Flag` types will be documented below.
 
-## Command
+## Command.
 | Struct Field | Usage |
 |:------------:|-------|
 |Name|This is the name of the command, and used as an argument to its parent argument to call its functionality.|
