@@ -1,59 +1,41 @@
 {
+  description = "Description for the project";
+
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
-    flake-utils.url = "github:numtide/flake-utils";
+    flake-parts.url = "github:hercules-ci/flake-parts";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
   };
 
-  outputs = { self, nixpkgs, flake-utils }:
-    flake-utils.lib.eachDefaultSystem (system:
-      let
-        pkgs = import nixpkgs { inherit system; };
-        cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
-        pkgName = cargoToml.package.name;
-        pkgVersion = cargoToml.package.version;
-      in rec {
-        rustc = pkgs.rustc;
+  outputs =
+    inputs@{ flake-parts, ... }:
+    flake-parts.lib.mkFlake { inherit inputs; } {
+      imports = [ ];
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+        "aarch64-darwin"
+        "x86_64-darwin"
+      ];
+      perSystem =
+        {
+          pkgs,
+          ...
+        }:
+        {
 
-        pax = pkgs.rustPlatform.buildRustPackage {
-          pname = pkgName;
-          version = pkgVersion;
-          src = pkgs.lib.cleanSource ./.;
-          cargoLock = { lockFile = ./Cargo.lock; };
-
-          buildPhase = ''
-            export CARGO_HOME="$PWD/.cargo"
-            cargo build --release --locked
-          '';
-          installPhase = ''
-            mkdir -p $out/bin
-            BIN="target/release/${pkgName}"
-            cp "$BIN" $out/bin/
-          '';
-
-          nativeBuildInputs = with pkgs; [ pkg-config openssl cmake ];
-          buildInputs = with pkgs; [ zlib openssl ];
-        };
-
-        packages = {
-          default = pax;
-        };
-        defaultPackage = pax;
-
-        devShells = {
-          default = pkgs.mkShell {
-            name = "rust-dev-shell";
-            buildInputs = with pkgs; [
-              rustc
-              cargo
-              rustfmt
-              rust-analyzer
-              sccache
+          devShells.default = pkgs.mkShell {
+            buildInputs = [
+              pkgs.cargo
+              pkgs.rustc
+              pkgs.pkg-config
+              pkgs.openssl
             ];
+
             shellHook = ''
-              pax = ./target/debug/pax
+              export RUST_SRC_PATH="${pkgs.rustPlatform.rustLibSrc}";
             '';
           };
         };
-      }
-    );
+      flake = { };
+    };
 }
