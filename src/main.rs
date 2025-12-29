@@ -39,6 +39,7 @@ pub fn main() {
             remove::build_purge,
             remove::build_remove,
             repo::build,
+            metadata::extensions::cli::build,
             search::build,
             update::build,
             upgrade::build,

@@ -5,6 +5,9 @@ edition = "2024"
 
 [dependencies]
 flate2 = "1.0"
+commands.workspace = true
+flags.workspace = true
+statebox.workspace = true
 nix.workspace = true
 reqwest.workspace = true
 serde.workspace = true
