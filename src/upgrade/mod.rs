@@ -10,7 +10,7 @@ pub fn build(hierarchy: &[String]) -> Command {
         "upgrade",
         vec![String::from("g")],
         "Upgrades a non-phased package from its upgrade metadata.",
-        vec![utils::yes_flag()],
+        vec![utils::yes_flag(), utils::refresh_flag()],
         None,
         run,
         hierarchy,
@@ -43,11 +43,12 @@ fn run(states: &StateBox, args: Option<&[String]>) -> PostAction {
     let Ok(runtime) = Runtime::new() else {
         return PostAction::Fuck(String::from("Error creating runtime!"));
     };
+    let refresh_cache = states.get("refresh_cache").is_some_and(|x: &bool| *x);
     let data = match if args.is_empty() {
-        runtime.block_on(upgrade_all())
+        runtime.block_on(upgrade_all(refresh_cache))
     } else {
         let package_names: Vec<String> = args.iter().map(|(name, _)| (*name).clone()).collect();
-        runtime.block_on(upgrade_only(package_names))
+        runtime.block_on(upgrade_only(package_names, refresh_cache))
     } {
         Ok(data) => data,
         Err(fault) => return PostAction::Fuck(fault),
@@ -66,7 +67,7 @@ fn run(states: &StateBox, args: Option<&[String]>) -> PostAction {
             Ok(true) => (),
         };
     }
-    if let Err(fault) = runtime.block_on(upgrade_packages(data)) {
+    if let Err(fault) = runtime.block_on(upgrade_packages(data, refresh_cache)) {
         return PostAction::Fuck(fault);
     }
     PostAction::Return

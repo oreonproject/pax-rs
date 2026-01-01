@@ -1,7 +1,7 @@
 use commands::Command;
 use flags::Flag;
 use metadata::list_installed_packages;
-use settings::acquire_lock;
+use settings::check_root_required;
 use statebox::StateBox;
 use utils::{PostAction};
 
@@ -53,10 +53,9 @@ pub fn build(hierarchy: &[String]) -> Command {
 }
 
 fn run(states: &StateBox, _args: Option<&[String]>) -> PostAction {
-    match acquire_lock() {
-        Ok(Some(action)) => return action,
-        Err(fault) => return PostAction::Fuck(fault),
-        _ => (),
+    // List is read-only, doesn't require root
+    if let Some(action) = check_root_required(false) {
+        return action;
     }
 
     let show_deps = states.get::<bool>("show_deps").is_some_and(|x| *x);

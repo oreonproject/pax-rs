@@ -1,6 +1,5 @@
 use commands::Command;
 use flags::Flag;
-use metadata::get_packages;
 use settings::{SettingsYaml, acquire_lock, OriginKind};
 use statebox::StateBox;
 use tokio::runtime::Runtime;
@@ -369,6 +368,7 @@ fn build_iso(
         let (remote_data, missing_info) = runtime.block_on(fetch_packages_from_repos(
             package_list.to_vec(),
             repositories,
+            false, // isocreate doesn't need refresh
         ))
         .map_err(|e| format!("Failed to get packages: {}", e))?;
         
@@ -2652,6 +2652,7 @@ struct MissingPackageInfo {
 async fn fetch_packages_from_repos(
     package_names: Vec<String>,
     repositories: &[OriginKind],
+    _force_refresh: bool,
 ) -> Result<(Vec<metadata::InstallPackage>, Vec<MissingPackageInfo>), String> {
     use metadata::ProcessedMetaData;
     use std::collections::HashSet;

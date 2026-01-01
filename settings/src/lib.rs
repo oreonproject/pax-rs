@@ -3,11 +3,19 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     thread::sleep,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
 use utils::{PostAction, err, get_dir, is_root};
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct MirrorEntry {
+    url: String,
+    location: Option<String>,
+    priority: Option<i32>,
+}
+
 
 #[derive(PartialEq, Serialize, Deserialize, Debug, Clone)]
 pub struct SettingsYaml {
@@ -18,6 +26,8 @@ pub struct SettingsYaml {
     #[serde(default)]
     pub mirror_list: Option<String>,
     pub sources: Vec<OriginKind>,
+    #[serde(default)]
+    pub disabled_sources: Vec<String>, // URLs of sources that failed health checks
 }
 
 impl SettingsYaml {
@@ -61,9 +71,28 @@ impl SettingsYaml {
             exec: None,
             mirror_list: None,
             sources: Vec::new(),
+            disabled_sources: Vec::new(),
         }
     }
-    pub fn set_settings(self) -> Result<(), String> {
+    pub fn set_settings(mut self) -> Result<(), String> {
+        // Remove duplicate sources before saving
+        let mut unique_sources = Vec::new();
+        for source in self.sources {
+            let is_duplicate = unique_sources.iter().any(|existing| {
+                match (existing, &source) {
+                    (OriginKind::Pax(existing_url), OriginKind::Pax(new_url)) => existing_url == new_url,
+                    (OriginKind::Apt(existing_url), OriginKind::Apt(new_url)) => existing_url == new_url,
+                    (OriginKind::Rpm(existing_url), OriginKind::Rpm(new_url)) => existing_url == new_url,
+                    (OriginKind::Github { user: eu, repo: er }, OriginKind::Github { user: nu, repo: nr }) => eu == nu && er == nr,
+                    _ => false,
+                }
+            });
+            if !is_duplicate {
+                unique_sources.push(source);
+            }
+        }
+        self.sources = unique_sources;
+
         let mut file = match File::create(affirm_path()?) {
             Ok(file) => file,
             Err(_) => return err!("Failed to open SettingsYaml as WO!"),
@@ -78,19 +107,47 @@ impl SettingsYaml {
         }
     }
     pub fn get_settings() -> Result<Self, String> {
-        let mut file = match File::open(affirm_path()?) {
+        let path = {
+            let mut p = get_dir()?;
+            p.push("settings.yaml");
+            p
+        };
+
+        let mut file = match File::open(&path) {
             Ok(file) => file,
-            Err(_) => return err!("Failed to open SettingsYaml as RO!"),
+            Err(_) => {
+                // If settings file doesn't exist, return default settings
+                return Ok(Self::new());
+            }
         };
         let mut data = String::new();
         if file.read_to_string(&mut data).is_err() {
             return err!("Failed to read file!");
         };
-        let mut settings: SettingsYaml = match serde_norway::from_str(&data) {
-            Ok(settings_yaml) => settings_yaml,
-            Err(_) => {
-                // If parsing fails, try to migrate from old format or create new settings
-                println!("\x1B[93m[WARN] Settings file format is outdated or corrupted. Migrating to new format...\x1B[0m");
+        let mut settings: SettingsYaml = match serde_norway::from_str::<SettingsYaml>(&data) {
+            Ok(mut settings_yaml) => {
+                // Clean URL prefixes from stored repository URLs
+                for source in &mut settings_yaml.sources {
+                    match source {
+                        OriginKind::Rpm(url) | OriginKind::Yum(url) | OriginKind::Apt(url) | OriginKind::Deb(url) => {
+                            let cleaned = url
+                                .strip_prefix("rpm://")
+                                .or_else(|| url.strip_prefix("yum://"))
+                                .or_else(|| url.strip_prefix("dnf://"))
+                                .or_else(|| url.strip_prefix("apt://"))
+                                .or_else(|| url.strip_prefix("deb://"))
+                                .map(|s| s.trim_end_matches('/').to_string())
+                                .unwrap_or_else(|| url.trim_end_matches('/').to_string());
+                            *url = cleaned;
+                        }
+                        _ => {}
+                    }
+                }
+                settings_yaml
+            }
+            Err(e) => {
+                // If parsing fails, log the error and create fresh settings
+                println!("\x1B[93m[WARN] Settings file corrupted ({}). Creating fresh settings...\x1B[0m", e);
                 let new_settings = Self::new();
                 if let Err(e) = new_settings.clone().set_settings() {
                     return err!("Failed to create new settings file: {}", e);
@@ -105,14 +162,208 @@ impl SettingsYaml {
                     settings.mirror_list = mirror;
                 }
                 if !file_sources.is_empty() {
-                    settings.sources = file_sources;
+                    // Validate and clean up sources
+                    let mut valid_sources = Vec::new();
+                    for source in file_sources {
+                        // Skip obviously invalid sources
+                        let is_valid = match &source {
+                            OriginKind::Pax(url) => {
+                                // Skip local URLs that are likely non-existent
+                                let should_skip = url.contains("pax.local") ||
+                                    url.contains("localhost") ||
+                                    url.contains("127.0.0.1") ||
+                                    url.is_empty() ||
+                                    (!url.starts_with("http://") && !url.starts_with("https://"));
+                                !should_skip
+                            },
+                        OriginKind::Apt(url) | OriginKind::Rpm(url) | OriginKind::Deb(url) | OriginKind::Yum(url) | OriginKind::LocalDir(url) => {
+                            // Allow URLs with prefixes (they'll be cleaned when used)
+                            let clean_url = url
+                                .strip_prefix("rpm://")
+                                .or_else(|| url.strip_prefix("yum://"))
+                                .or_else(|| url.strip_prefix("dnf://"))
+                                .or_else(|| url.strip_prefix("apt://"))
+                                .or_else(|| url.strip_prefix("deb://"))
+                                .or_else(|| url.strip_prefix("pax://"))
+                                .unwrap_or(url);
+                            !url.is_empty() && (clean_url.starts_with("http://") || clean_url.starts_with("https://") || clean_url.starts_with("/"))
+                        },
+                        OriginKind::Github { user, repo } => {
+                            !user.is_empty() && !repo.is_empty()
+                        },
+                        OriginKind::CloudflareR2 { .. } => false, // Skip R2 repos for validation
+                    };
+
+                        // Remove duplicates
+                        let is_duplicate = valid_sources.iter().any(|existing| {
+                            match (existing, &source) {
+                                (OriginKind::Pax(existing_url), OriginKind::Pax(new_url)) => existing_url == new_url,
+                                (OriginKind::Apt(existing_url), OriginKind::Apt(new_url)) => existing_url == new_url,
+                                (OriginKind::Rpm(existing_url), OriginKind::Rpm(new_url)) => existing_url == new_url,
+                                (OriginKind::Github { user: eu, repo: er }, OriginKind::Github { user: nu, repo: nr }) => eu == nu && er == nr,
+                                _ => false,
+                            }
+                        });
+
+                        if is_valid && !is_duplicate {
+                            valid_sources.push(source);
+                        }
+                    }
+                    settings.sources = valid_sources;
+                } else {
+                    // No sources configured - use correct Oreon mirror
+                    let arch = match settings.arch {
+                        Arch::X86_64v1 => "x86_64v1",
+                        Arch::X86_64v3 => "x86_64v3",
+                        Arch::Aarch64 => "aarch64",
+                        _ => "x86_64v3", // default fallback
+                    };
+                    let oreon_url = format!("https://repo.oreonproject.org/oreon-11/unstable/{}", arch);
+                    settings.sources.push(OriginKind::Pax(oreon_url));
                 }
+                // Deduplicate sources before ensuring required repositories
+                let mut deduplicated_sources = Vec::new();
+                let mut seen_urls = std::collections::HashSet::new();
+                let mut fedora_repos = Vec::new();
+
+                // Separate Fedora repos for special handling
+                for source in &settings.sources {
+                    match source {
+                        OriginKind::Rpm(url) if url.contains("dl.fedoraproject.org") => {
+                            fedora_repos.push(source.clone());
+                        }
+                        _ => {
+                            let url = match source {
+                                OriginKind::Pax(url) => url.clone(),
+                                OriginKind::Apt(url) => url.clone(),
+                                OriginKind::Rpm(url) => url.clone(),
+                                OriginKind::Deb(url) => url.clone(),
+                                OriginKind::Yum(url) => url.clone(),
+                                OriginKind::LocalDir(url) => url.clone(),
+                                _ => continue, // Skip other types for deduplication
+                            };
+
+                            if !seen_urls.contains(&url) {
+                                seen_urls.insert(url);
+                                deduplicated_sources.push(source.clone());
+                            }
+                        }
+                    }
+                }
+
+                // For Fedora repos, ensure both base and updates are available
+                if !fedora_repos.is_empty() {
+                    let has_updates = fedora_repos.iter().any(|repo| {
+                        matches!(repo, OriginKind::Rpm(url) if url.contains("updates"))
+                    });
+                    let has_valid_base = fedora_repos.iter().any(|repo| {
+                        if let OriginKind::Rpm(url) = repo {
+                            url.contains("/releases/") && url.contains("/os") && !url.contains("Everything/Everything")
+                        } else {
+                            false
+                        }
+                    });
+
+                    // Add all configured Fedora repos (but skip invalid base repos)
+                    for repo in &fedora_repos {
+                        if let OriginKind::Rpm(url) = repo {
+                            // Skip base repos with invalid URLs (Everything/Everything)
+                            if url.contains("/releases/") && url.contains("Everything/Everything") {
+                                continue;
+                            }
+                            if !seen_urls.contains(url) {
+                                seen_urls.insert(url.clone());
+                                deduplicated_sources.push(repo.clone());
+                            }
+                        }
+                    }
+
+                    // If updates is configured but valid base is not, automatically add base
+                    if has_updates && !has_valid_base {
+                        // Extract version and arch from updates URL
+                        // Example: https://dl.fedoraproject.org/pub/fedora/linux/updates/43/Everything/x86_64
+                        if let Some(updates_repo) = fedora_repos.iter().find(|repo| {
+                            matches!(repo, OriginKind::Rpm(url) if url.contains("updates"))
+                        }) {
+                            if let OriginKind::Rpm(updates_url) = updates_repo {
+                                // Strip rpm:// prefix if present
+                                let clean_url = updates_url.strip_prefix("rpm://").unwrap_or(updates_url);
+                                // Extract path structure from updates URL and construct base URL dynamically
+                                if let Some(updates_start) = clean_url.find("/updates/") {
+                                    // Get the base part before /updates/
+                                    let base_part = &clean_url[..updates_start];
+                                    let after_updates = &clean_url[updates_start + 9..];
+                                    // Split the path after /updates/ to get version and rest
+                                    let path_parts: Vec<&str> = after_updates.split('/').filter(|s| !s.is_empty()).collect();
+                                    if path_parts.len() >= 2 {
+                                        let version = path_parts[0];
+                                        // Get everything between version and arch (e.g., "Everything")
+                                        let middle_path = if path_parts.len() > 2 {
+                                            path_parts[1..path_parts.len()-1].join("/") + "/"
+                                        } else {
+                                            String::new()
+                                        };
+                                        // Get the last component (arch)
+                                        let arch = path_parts[path_parts.len() - 1];
+                                        
+                                        // Construct base URL by replacing /updates/ with /releases/ and appending /os
+                                        let base_url = format!(
+                                            "{}/releases/{}/{}{}/os",
+                                            base_part, version, middle_path, arch
+                                        );
+                                        
+                                        if !seen_urls.contains(&base_url) {
+                                            seen_urls.insert(base_url.clone());
+                                            deduplicated_sources.push(OriginKind::Rpm(base_url));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                settings.sources = deduplicated_sources;
+
+                // Ensure only one Oreon repository (prefer the official one)
+                let oreon_url_pattern = {
+                    let arch = match settings.arch {
+                        Arch::X86_64v1 => "x86_64v1",
+                        Arch::X86_64v3 => "x86_64v3",
+                        Arch::Aarch64 => "aarch64",
+                        _ => "x86_64v3", // default fallback
+                    };
+                    format!("https://repo.oreonproject.org/oreon-11/unstable/{}", arch)
+                };
+
+                let has_oreon = settings.sources.iter().any(|source| {
+                    matches!(source, OriginKind::Pax(url) if url == &oreon_url_pattern)
+                });
+                if !has_oreon {
+                    settings.sources.push(OriginKind::Pax(oreon_url_pattern.clone()));
+                }
+
+                // Remove duplicate Oreon repositories, keeping only the official one
+                settings.sources.retain(|source| {
+                    !matches!(source, OriginKind::Pax(url) if url.contains("oreon") && url != &oreon_url_pattern)
+                });
+
             }
             Err(fault) => {
                 println!(
                     "\x1B[93m[WARN] Unable to load sources config: {}\x1B[0m",
                     fault
                 );
+                // Start with default repositories
+                settings.sources.push(OriginKind::Pax("http://pax.local:8080".to_string()));
+                let arch = match settings.arch {
+                    Arch::X86_64v1 => "x86_64v1",
+                    Arch::X86_64v3 => "x86_64v3",
+                    Arch::Aarch64 => "aarch64",
+                    _ => "x86_64v3", // default fallback
+                };
+                let oreon_url = format!("https://mirrors.oreonhq.com/oreon-11/unstable/{}", arch);
+                settings.sources.push(OriginKind::Pax(oreon_url));
             }
         }
         Ok(settings)
@@ -170,6 +421,206 @@ impl Default for SettingsYaml {
     }
 }
 
+/// Fetch mirrors from the Oreon mirror list URL
+fn fetch_oreon_mirrors() -> Result<Vec<String>, String> {
+    let mirror_list_url = "https://mirrors.oreonhq.com/oreon-11/sources";
+
+    // Create a client with aggressive timeout to avoid hanging
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .connect_timeout(std::time::Duration::from_secs(2))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+    match client.get(mirror_list_url).send() {
+        Ok(response) => {
+            if !response.status().is_success() {
+                return err!("Failed to fetch mirror list: HTTP {}", response.status());
+            }
+
+            match response.text() {
+                Ok(text) => {
+                    // The mirror list is a plain text file with one URL per line
+                    let mirrors: Vec<String> = text.lines()
+                        .map(|line| line.trim())
+                        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                        .map(|line| line.replace("$arch", "x86_64v3")) // Replace $arch with detected arch
+                        .collect();
+
+                    if mirrors.is_empty() {
+                        return err!("No mirrors found in mirror list");
+                    }
+
+                    Ok(mirrors)
+                }
+                Err(e) => err!("Failed to read mirror list response: {}", e),
+            }
+        }
+        Err(e) => err!("Failed to fetch mirror list from {}: {}", mirror_list_url, e),
+    }
+}
+
+/// Select the best/fastest mirror from the list using parallel testing
+fn select_best_mirror(mirrors: &[String]) -> Result<String, String> {
+    if mirrors.is_empty() {
+        return err!("No mirrors available");
+    }
+
+    // #region agent log
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/home/blester/pax-rs/.cursor/debug.log")
+        .and_then(|mut file| {
+            use std::io::Write;
+            writeln!(file, "{{\"sessionId\":\"debug-session\",\"runId\":\"mirror-selection\",\"hypothesisId\":\"MULTI_MIRROR\",\"location\":\"settings/src/lib.rs:464\",\"message\":\"selecting_best_mirror\",\"data\":{{\"mirror_count\":{},\"mirrors\":{:?}}},\"timestamp\":{}}}", 
+                mirrors.len(), mirrors, 
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
+            Ok(())
+        });
+    // #endregion
+
+    if mirrors.len() == 1 {
+        return Ok(mirrors[0].clone());
+    }
+
+    // Create a client with aggressive timeout for mirror testing
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(1))
+        .connect_timeout(std::time::Duration::from_millis(500))
+        .build() {
+        Ok(client) => client,
+        Err(_) => return Ok(mirrors[0].clone()), // Fall back to first mirror if client creation fails
+    };
+
+    let mut results = Vec::new();
+
+    // Test mirrors in parallel with a limit to avoid overwhelming the network
+    let max_concurrent = std::cmp::min(mirrors.len(), 3); // Test up to 3 mirrors concurrently
+
+    for chunk in mirrors.chunks(max_concurrent) {
+        let mut handles = Vec::new();
+
+        for mirror in chunk {
+            let mirror = mirror.clone();
+            let client = client.clone();
+            let handle = std::thread::spawn(move || {
+                let start = Instant::now();
+                // Use HEAD request for faster testing (no body download)
+                let test_url = format!("{}/checksums.json", mirror.trim_end_matches('/'));
+
+                match client.head(&test_url).send() {
+                    Ok(response) => {
+                        if response.status().is_success() {
+                            let elapsed = start.elapsed().as_millis();
+                            Some((mirror, elapsed))
+                        } else {
+                            None
+                        }
+                    }
+                    Err(_) => None,
+                }
+            });
+            handles.push(handle);
+        }
+
+        // Collect results from this batch
+        for handle in handles {
+            if let Ok(Some((mirror, time))) = handle.join() {
+                results.push((mirror, time));
+            }
+        }
+
+        // If we found a mirror under 500ms, use it immediately
+        if let Some((fast_mirror, _)) = results.iter().find(|(_, time)| *time < 500) {
+            // #region agent log
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("/home/blester/pax-rs/.cursor/debug.log")
+                .and_then(|mut file| {
+                    use std::io::Write;
+                    writeln!(file, "{{\"sessionId\":\"debug-session\",\"runId\":\"mirror-selection\",\"hypothesisId\":\"MULTI_MIRROR\",\"location\":\"settings/src/lib.rs:521\",\"message\":\"fast_mirror_found\",\"data\":{{\"selected_mirror\":\"{}\",\"response_time_ms\":{}}},\"timestamp\":{}}}", 
+                        fast_mirror, results.iter().find(|(m, _)| m == fast_mirror).map(|(_, t)| t).unwrap_or(&0),
+                        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
+                    Ok(())
+                });
+            // #endregion
+            return Ok(fast_mirror.clone());
+        }
+    }
+
+    // Return the fastest mirror from all results
+    if let Some((best_mirror, best_time)) = results.into_iter().min_by_key(|(_, time)| *time) {
+        // #region agent log
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/home/blester/pax-rs/.cursor/debug.log")
+            .and_then(|mut file| {
+                use std::io::Write;
+                writeln!(file, "{{\"sessionId\":\"debug-session\",\"runId\":\"mirror-selection\",\"hypothesisId\":\"MULTI_MIRROR\",\"location\":\"settings/src/lib.rs:527\",\"message\":\"best_mirror_selected\",\"data\":{{\"selected_mirror\":\"{}\",\"response_time_ms\":{}}},\"timestamp\":{}}}", 
+                    best_mirror, best_time,
+                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
+                Ok(())
+            });
+        // #endregion
+        Ok(best_mirror)
+    } else {
+        // All mirrors failed, fall back to first one
+        // #region agent log
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/home/blester/pax-rs/.cursor/debug.log")
+            .and_then(|mut file| {
+                use std::io::Write;
+                writeln!(file, "{{\"sessionId\":\"debug-session\",\"runId\":\"mirror-selection\",\"hypothesisId\":\"MULTI_MIRROR\",\"location\":\"settings/src/lib.rs:531\",\"message\":\"all_mirrors_failed_fallback\",\"data\":{{\"fallback_mirror\":\"{}\"}},\"timestamp\":{}}}", 
+                    mirrors[0],
+                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
+                Ok(())
+            });
+        // #endregion
+        Ok(mirrors[0].clone())
+    }
+}
+
+/// Get the best mirror URL, either from configured mirror list or fetch from Oreon
+/// Computes fresh each time to handle changing network conditions
+pub fn get_best_mirror_url() -> Result<String, String> {
+    // First try to get from settings
+    if let Ok(settings) = SettingsYaml::get_settings() {
+        if let Some(mirror_list_url) = &settings.mirror_list {
+            // If we have a configured mirror list URL, fetch mirrors from it
+            match reqwest::blocking::get(mirror_list_url) {
+                Ok(response) => {
+                    if response.status().is_success() {
+                        if let Ok(text) = response.text() {
+                            // The mirror list is a plain text file with one URL per line
+                            let mirrors: Vec<String> = text.lines()
+                                .map(|line| line.trim())
+                                .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                                .map(|line| line.replace("$arch", "x86_64v3")) // Replace $arch with detected arch
+                                .collect();
+
+                            if mirrors.is_empty() {
+                                return err!("No mirrors found in configured mirror list");
+                            }
+
+                            return select_best_mirror(&mirrors);
+                        }
+                    }
+                }
+                Err(_) => {} // Fall back to default
+            }
+        }
+    }
+
+    // Fall back to fetching from default Oreon mirror list
+    let mirrors = fetch_oreon_mirrors()?;
+    select_best_mirror(&mirrors)
+}
+
 fn load_sources_conf(dir: &Path) -> Result<(Option<String>, Vec<OriginKind>), String> {
     let path = dir.join("sources.conf");
     if !path.exists() {
@@ -224,11 +675,28 @@ fn load_sources_conf(dir: &Path) -> Result<(Option<String>, Vec<OriginKind>), St
             }
             Some("repo") | Some("repository") => {
                 if let Some(url) = source_url {
-                    if url.starts_with("http://") || url.starts_with("https://") {
+                    // Strip URL scheme prefixes if present
+                    let clean_url: String = if url.starts_with("rpm://") {
+                        url[6..].to_string()
+                    } else if url.starts_with("yum://") {
+                        url[6..].to_string()
+                    } else if url.starts_with("dnf://") {
+                        url[6..].to_string()
+                    } else if url.starts_with("apt://") {
+                        url[6..].to_string()
+                    } else if url.starts_with("deb://") {
+                        url[6..].to_string()
+                    } else if url.starts_with("pax://") {
+                        url[6..].to_string()
+                    } else {
+                        url.clone()
+                    };
+                    
+                    if clean_url.starts_with("http://") || clean_url.starts_with("https://") {
                         let origin = match provider.as_deref() {
-                            Some("apt") | Some("deb") => OriginKind::Apt(url.clone()),
-                            Some("rpm") | Some("yum") | Some("dnf") => OriginKind::Rpm(url.clone()),
-                            Some("dpkg") => OriginKind::Deb(url.clone()),
+                            Some("apt") | Some("deb") => OriginKind::Apt(clean_url.clone()),
+                            Some("rpm") | Some("yum") | Some("dnf") => OriginKind::Rpm(clean_url.clone()),
+                            Some("dpkg") => OriginKind::Deb(clean_url.clone()),
                             Some("cloudflare") | Some("r2") => {
                                 // Parse Cloudflare R2 configuration
                                 let bucket = find("bucket").unwrap_or("").to_string();
@@ -256,20 +724,20 @@ fn load_sources_conf(dir: &Path) -> Result<(Option<String>, Vec<OriginKind>), St
                             },
                             Some("local") | Some("dir") | Some("directory") => {
                                 // Check if it's a valid directory
-                                let dir_path = Path::new(&url);
+                                let dir_path = Path::new(&clean_url);
                                 if dir_path.exists() && dir_path.is_dir() {
                                     OriginKind::LocalDir(url.clone())
                                 } else {
                                     println!(
                                         "\x1B[93m[WARN] Local directory repository does not exist: `{}` on line {} of {}.\x1B[0m",
-                                        url,
+                                        clean_url,
                                         idx + 1,
                                         path.display()
                                     );
                                     continue;
                                 }
                             },
-                            _ => OriginKind::Pax(url.clone()),
+                            _ => OriginKind::Pax(clean_url.clone()),
                         };
                         sources.push(origin);
                     } else if url.starts_with("apt://") {
@@ -426,6 +894,72 @@ pub fn acquire_lock() -> Result<Option<PostAction>, String> {
     acquire_lock_with_auto_force(false)
 }
 
+pub fn check_root_required(required: bool) -> Option<PostAction> {
+    if required && !is_root() {
+        Some(PostAction::Elevate)
+    } else {
+        None
+    }
+}
+
+pub fn disable_unhealthy_sources() -> Result<(), String> {
+    let mut settings = SettingsYaml::get_settings().map_err(|e| format!("Failed to load settings: {}", e))?;
+
+    // Create a test client with very aggressive timeouts
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .connect_timeout(std::time::Duration::from_millis(500))
+        .build() {
+        Ok(client) => client,
+        Err(_) => return Ok(()), // Can't test, skip
+    };
+
+    let mut unhealthy_urls = Vec::new();
+
+    // Test each source
+    for source in &settings.sources {
+        let test_url = match source {
+            OriginKind::Pax(url) => {
+                // For PAX repos, test the checksums.json endpoint
+                if url.contains("oreon") {
+                    format!("{}/checksums.json", url.trim_end_matches('/'))
+                } else {
+                    // For other repos, just test basic connectivity to base URL
+                    url.clone()
+                }
+            },
+            OriginKind::Apt(url) | OriginKind::Rpm(url) | OriginKind::Deb(url) | OriginKind::Yum(url) | OriginKind::LocalDir(url) => url.clone(),
+            OriginKind::Github { .. } => continue, // Skip GitHub repos for now
+            OriginKind::CloudflareR2 { .. } => continue, // Skip R2 repos for now
+        };
+
+        // Skip if already disabled
+        if settings.disabled_sources.contains(&test_url) {
+            continue;
+        }
+
+        // Test the URL
+        let is_healthy = match client.head(&test_url).send() {
+            Ok(response) => response.status().is_success(),
+            Err(_) => false,
+        };
+
+        if !is_healthy {
+            unhealthy_urls.push(test_url);
+        }
+    }
+
+        // Disable unhealthy sources
+        if !unhealthy_urls.is_empty() {
+            settings.disabled_sources.extend(unhealthy_urls);
+            let disabled_count = settings.disabled_sources.len();
+            settings.set_settings()?;
+            println!("\x1B[93m[INFO] Disabled {} unresponsive repositories\x1B[0m", disabled_count);
+        }
+
+    Ok(())
+}
+
 pub fn acquire_lock_with_auto_force(auto_force_unlock: bool) -> Result<Option<PostAction>, String> {
     if !is_root() {
         return Ok(Some(PostAction::Elevate));
@@ -546,3 +1080,4 @@ pub fn remove_lock() -> Result<(), String> {
     settings.locked = false;
     settings.set_settings()
 }
+

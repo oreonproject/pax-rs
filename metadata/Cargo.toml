@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 flate2 = "1.0"
+zstd = "0.13"
+byteorder = "1.5"
 nix.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -19,6 +21,8 @@ futures = "0.3"
 tempfile = "3.8"
 serde_yaml = "0.9"
 quick-xml.workspace = true
+async-compression = { version = "0.4", features = ["tokio", "gzip", "zstd"] }
+tokio-util = { version = "0.7", features = ["codec", "io"] }
 
 [dev-dependencies]
 tokio-test = "0.4"

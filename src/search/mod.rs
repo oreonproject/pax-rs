@@ -1,7 +1,7 @@
 use commands::Command;
 use flags::Flag;
 use metadata::search_packages;
-use settings::{acquire_lock, SettingsYaml};
+use settings::{check_root_required, SettingsYaml};
 use statebox::StateBox;
 use tokio::runtime::Runtime;
 use utils::{PostAction};
@@ -40,11 +40,22 @@ pub fn build(hierarchy: &[String]) -> Command {
         },
     );
 
+    let remote = Flag::new(
+        Some('r'),
+        "remote",
+        "Search remote repositories in addition to installed packages",
+        false,
+        false,
+        |states, _| {
+            states.shove("remote", true);
+        },
+    );
+
     Command::new(
         "search",
         vec![String::from("s")],
         "Search for packages by name or description",
-        vec![exact, installed, show_deps],
+        vec![exact, installed, show_deps, remote],
         None,
         run,
         hierarchy,
@@ -52,12 +63,10 @@ pub fn build(hierarchy: &[String]) -> Command {
 }
 
 fn run(states: &StateBox, args: Option<&[String]>) -> PostAction {
-    match acquire_lock() {
-        Ok(Some(action)) => return action,
-        Err(fault) => return PostAction::Fuck(fault),
-        _ => (),
+    // Search is read-only, doesn't require root
+    if let Some(action) = check_root_required(false) {
+        return action;
     }
-
     let args = match args {
         None => return PostAction::Fuck(String::from("No search term provided!")),
         Some(args) => args,
@@ -69,7 +78,8 @@ fn run(states: &StateBox, args: Option<&[String]>) -> PostAction {
 
     let search_term = args.join(" ");
     let exact_match = states.get::<bool>("exact").is_some_and(|x| *x);
-    let installed_only = states.get::<bool>("installed").is_some_and(|x| *x);
+    let installed_only = states.get::<bool>("installed").is_some_and(|x| *x) ||
+        !states.get::<bool>("remote").is_some_and(|x| *x); // Default to installed only unless --remote is specified
     let show_deps = states.get::<bool>("show_deps").is_some_and(|x| *x);
 
     // Get settings if we're not searching installed only

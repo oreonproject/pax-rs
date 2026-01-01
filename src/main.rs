@@ -11,7 +11,6 @@ pub mod remove;
 pub mod repo;
 pub mod search;
 pub mod update;
-pub mod upgrade;
 
 pub fn main() {
     let args: Vec<String> = env::args().collect();
@@ -41,7 +40,6 @@ pub fn main() {
             repo::build,
             search::build,
             update::build,
-            upgrade::build,
         ]),
         |_command, _args| utils::PostAction::GetHelp,
         &[],

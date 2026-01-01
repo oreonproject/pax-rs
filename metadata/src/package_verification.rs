@@ -306,6 +306,40 @@ impl PackageVerifier {
 
         Ok(())
     }
+
+    /// Load Oreon keyring from the official keyring URL
+    pub async fn load_oreon_keyring(&mut self) -> Result<(), String> {
+        let keyring_url = "https://mirrors.oreonhq.com/oreon-11/keyring.json";
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+        let response = client.get(keyring_url).send().await
+            .map_err(|e| format!("Failed to fetch Oreon keyring: {}", e))?;
+
+        if !response.status().is_success() {
+            return err!("Failed to fetch Oreon keyring: HTTP {}", response.status());
+        }
+
+        let keyring_text = response.text().await
+            .map_err(|e| format!("Failed to read keyring response: {}", e))?;
+
+        let keyring: serde_json::Value = serde_json::from_str(&keyring_text)
+            .map_err(|e| format!("Failed to parse keyring JSON: {}", e))?;
+
+        // Parse keyring format (assuming it's a JSON object with key_id -> public_key mappings)
+        if let Some(keys_obj) = keyring.as_object() {
+            for (key_id, public_key_value) in keys_obj {
+                if let Some(public_key) = public_key_value.as_str() {
+                    self.trusted_keys.insert(key_id.clone(), public_key.to_string());
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl Default for PackageVerifier {

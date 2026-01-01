@@ -288,7 +288,9 @@ impl Command {
                 println!(
                     "\x1B[95mThe action you attempted to perform requires root privileges.\x1B[0m"
                 );
-                match choice("Would you like to try perform this action as sudo?", false) {
+                println!("\x1B[93mPlease run this command with sudo: sudo {}\x1B[0m",
+                    env::args().collect::<Vec<String>>().join(" "));
+                match choice("Would you like pax to run this command with sudo for you?", false) {
                     Err(message) => println!("{message}"),
                     Ok(true) => {
                         println!("Attempting to elevate execution...");
@@ -296,7 +298,12 @@ impl Command {
                         let mut cmd = RunCommand::new("sudo");
                         match cmd.args(env::args()).status() {
                             Ok(status) => std::process::exit(status.code().unwrap_or_default()),
-                            Err(_) => println!("Failed to acquire sudo!"),
+                            Err(e) => {
+                                println!("\x1B[91mFailed to acquire sudo automatically: {}\x1B[0m", e);
+                                println!("\x1B[93mPlease run the command manually: sudo {}\x1B[0m",
+                                    env::args().collect::<Vec<String>>().join(" "));
+                                std::process::exit(1);
+                            }
                         }
                     }
                     Ok(false) => println!("\x1B[91mAbort.\x1B[0m"),

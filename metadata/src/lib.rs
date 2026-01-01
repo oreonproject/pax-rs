@@ -13,6 +13,8 @@ pub mod cloudflare_r2;
 pub mod deb_repository;
 pub mod yum_repository;
 pub mod performance;
+pub mod rpm_parser;
+pub mod repo_index;
 
 // Re-export commonly used types
 pub use utils::{DepVer, Specific};

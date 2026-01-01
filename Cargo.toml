@@ -7,7 +7,7 @@ commands = { path = "./commands" }
 flags = { path = "./flags" }
 metadata = { path = "./metadata" }
 nix = { version = "0.30.1", features = ["user"] }
-reqwest = { version = "0.12.24", features = ["blocking"] }
+reqwest = { version = "0.12.24", features = ["blocking", "stream"] }
 settings = { path = "./settings" }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
@@ -44,6 +44,7 @@ utils.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
 serde_yaml.workspace = true
+futures.workspace = true
 
 # [env]
 # You can find some static variables in .cargo/config.toml

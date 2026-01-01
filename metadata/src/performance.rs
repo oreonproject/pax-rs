@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
+use crate::processed::ProcessedMetaData;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CacheEntry<T> {
@@ -311,7 +312,14 @@ impl ParallelDownloader {
         self.performance_tracker.record_cache_miss();
 
         // Download the file
-        let response = reqwest::get(&url).await
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .connect_timeout(std::time::Duration::from_secs(2))
+            .read_timeout(std::time::Duration::from_secs(3))
+            .build()
+            .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+        let response = client.get(&url).send().await
             .map_err(|e| format!("Failed to download {}: {}", url, e))?;
         let data = response.bytes().await
             .map_err(|e| format!("Failed to read response bytes: {}", e))?

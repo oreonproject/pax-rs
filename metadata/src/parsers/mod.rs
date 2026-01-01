@@ -11,4 +11,5 @@ pub enum MetaDataKind {
     Pax,
     Github,
     Rpm,
+    Deb,
 }

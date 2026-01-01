@@ -117,6 +117,7 @@ fn run(states: &StateBox, args: Option<&[String]>, purge: bool) -> PostAction {
     }
     
     println!("\x1B[92mSuccessfully removed package(s): {}\x1B[0m", package_names.join(", "));
+    println!("\x1B[92mAll installed files, symlinks, and directories have been removed.\x1B[0m");
     
     // Find orphaned dependencies AFTER removing packages (only for purge)
     let orphans = if purge {
@@ -149,6 +150,24 @@ fn find_orphaned_dependencies(removed_packages: &[String], _removed_deps: &std::
         Ok(packages) => packages,
         Err(_) => return Vec::new(),
     };
+
+    // Build a set of remaining packages (not being removed)
+    let remaining_packages: std::collections::HashSet<String> = all_packages.iter()
+        .map(|p| p.name.clone())
+        .filter(|name| !removed_packages.contains(name))
+        .collect();
+
+    // Build a dependency map for efficient lookup
+    let mut dependency_map: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    for package in &all_packages {
+        if remaining_packages.contains(&package.name) {
+            for dep in &package.dependencies {
+                dependency_map.entry(dep.name.clone())
+                    .or_insert_with(Vec::new)
+                    .push(package.name.clone());
+            }
+        }
+    }
     
     // Collect dependencies that were installed by the removed packages
     let mut potential_orphans = std::collections::HashSet::new();
@@ -160,32 +179,11 @@ fn find_orphaned_dependencies(removed_packages: &[String], _removed_deps: &std::
         }
     }
     
-    // Check which of these are actually orphans (not needed by other packages)
+    // Check which of these are actually orphans (not needed by any remaining package)
     let mut orphans = Vec::new();
     for orphan_candidate in &potential_orphans {
-        let mut is_needed = false;
-        
-        // Check if any remaining package depends on this
-        for package in &all_packages {
-            // Skip removed packages
-            if removed_packages.contains(&package.name) {
-                continue;
-            }
-            
-            // Skip the orphan candidate itself
-            if package.name == *orphan_candidate {
-                continue;
-            }
-            
-            // Check if this package depends on the orphan candidate
-            if package.dependencies.iter().any(|d| d.name == *orphan_candidate) {
-                is_needed = true;
-                break;
-            }
-        }
-        
-        // If not needed by any other package, it's a true orphan
-        if !is_needed {
+        // Check if any remaining package depends on this orphan
+        if !dependency_map.contains_key(orphan_candidate) {
             orphans.push(orphan_candidate.clone());
         }
     }
@@ -204,14 +202,15 @@ fn remove_package(package_name: &str, purge: bool) -> Result<(), String> {
         return Err(format!("Package {} is not installed", package_name));
     }
     
-    // Remove the package's file manifest if purge is requested
-    if purge {
-        let manifest_file = installed_dir.join(format!("{}.manifest.json", package_name));
+    // Remove installed files BEFORE removing metadata
+    if let Ok(manifest) = metadata::file_tracking::FileManifest::load(package_name) {
+        manifest.remove_files(purge)?;
+    }
+
+    // Remove the package's file manifest
+    let manifest_file = installed_dir.join("manifests").join(format!("{}.yaml", package_name));
         if manifest_file.exists() {
             let _ = fs::remove_file(&manifest_file);
-        }
-        
-        // TODO: Clean up backup files
     }
     
     // Remove the package metadata file

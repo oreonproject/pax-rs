@@ -2,6 +2,10 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use settings::OriginKind;
 use utils::err;
+use futures::StreamExt;
+use async_compression::tokio::bufread::GzipDecoder;
+use tokio_util::io::StreamReader;
+use tokio::io::AsyncBufReadExt;
 
 #[derive(Debug, Clone)]
 pub struct YumRepositoryClient {
@@ -11,8 +15,19 @@ pub struct YumRepositoryClient {
 
 impl YumRepositoryClient {
     pub fn new(base_url: String) -> Self {
+        // Clean URL prefixes if present
+        let mut clean_url = base_url
+            .strip_prefix("rpm://")
+            .or_else(|| base_url.strip_prefix("yum://"))
+            .or_else(|| base_url.strip_prefix("dnf://"))
+            .map(|s| s.to_string())
+            .unwrap_or(base_url);
+        
+        // Ensure URL doesn't end with a trailing slash (we add paths with leading slashes)
+        clean_url = clean_url.trim_end_matches('/').to_string();
+        
         Self {
-            base_url,
+            base_url: clean_url,
             client: Client::new(),
         }
     }
@@ -51,9 +66,11 @@ impl YumRepositoryClient {
         let bytes = response.bytes().await
             .map_err(|e| format!("Failed to read package list: {}", e))?;
 
-        // Check if it's gzipped and decompress if needed
+        // Check compression type and decompress if needed
         let packages_content = if primary_url.ends_with(".gz") {
             self.decompress_gzip_bytes(&bytes)?
+        } else if primary_url.ends_with(".zst") {
+            self.decompress_zstd_bytes(&bytes)?
         } else {
             String::from_utf8(bytes.to_vec())
                 .map_err(|e| format!("Failed to convert bytes to string: {}", e))?
@@ -73,19 +90,121 @@ impl YumRepositoryClient {
     }
 
     pub async fn get_package(&self, package_name: &str, version: Option<&str>) -> Result<YumPackageInfo, String> {
-        let packages = self.list_packages().await?;
-        
-        let package = packages.iter()
-            .find(|p| p.name == package_name)
-            .ok_or_else(|| format!("Package {} not found", package_name))?;
+        self.get_package_inner(package_name, version).await
+    }
 
-        if let Some(version) = version {
-            if package.version != version {
-                return err!("Package {} version {} not found (available: {})", package_name, version, package.version);
+    async fn get_package_inner(&self, package_name: &str, version: Option<&str>) -> Result<YumPackageInfo, String> {
+        // Optimized: stream parse XML and stop when we find the package
+        // This avoids downloading/parsing the entire metadata file
+
+        // First, get the repomd.xml to find the correct primary.xml filename
+        let repomd_url = format!("{}/repodata/repomd.xml", self.base_url);
+        let repomd_response = self.client.get(&repomd_url).send().await
+            .map_err(|e| format!("Failed to fetch repomd.xml: {}", e))?;
+
+        if !repomd_response.status().is_success() {
+            return err!("Failed to fetch repomd.xml: {}", repomd_response.status());
+        }
+
+        let repomd_content = repomd_response.text().await
+            .map_err(|e| format!("Failed to read repomd.xml: {}", e))?;
+
+        // Parse repomd.xml to find the primary.xml.gz filename
+        let primary_filename = self.parse_repomd_for_primary(&repomd_content)?;
+        let primary_url = format!("{}/{}", self.base_url, primary_filename);
+
+        // Stream the response and parse incrementally - stop as soon as we find the package
+        let response = self.client.get(&primary_url).send().await
+            .map_err(|e| format!("Failed to fetch package list: {}", e))?;
+
+        if !response.status().is_success() {
+            return err!("Failed to fetch package list: {}", response.status());
+        }
+
+        // Convert response stream to async reader
+        let stream = response.bytes_stream()
+            .map(|result| result.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)));
+        let reader = StreamReader::new(stream);
+
+        // Decompress if compressed
+        let mut reader: Box<dyn tokio::io::AsyncBufRead + Unpin + Send> = if primary_url.ends_with(".gz") {
+            Box::new(tokio::io::BufReader::new(GzipDecoder::new(reader)))
+        } else if primary_url.ends_with(".zst") {
+            Box::new(tokio::io::BufReader::new(async_compression::tokio::bufread::ZstdDecoder::new(reader)))
+        } else {
+            Box::new(tokio::io::BufReader::new(reader))
+        };
+
+        // Use a faster approach: scan for package name first, then parse the full package
+        let mut package_xml = String::new();
+        let mut in_target_package = false;
+
+        loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line).await {
+                Ok(0) => break, // EOF
+                Ok(_) => {
+                    let trimmed = line.trim();
+
+                    // Look for package start
+                    if trimmed.starts_with("<package") && (trimmed.contains("type=\"rpm\"") || trimmed.contains("type='rpm'")) {
+                        in_target_package = false;
+                        package_xml.clear();
+                        package_xml.push_str(trimmed);
+                        package_xml.push('\n');
+                    } else if trimmed.starts_with("<name>") && trimmed.ends_with("</name>") {
+                        // Check if this is our target package
+                        if let Some(name) = trimmed.strip_prefix("<name>").and_then(|s| s.strip_suffix("</name>")) {
+                            if name.eq_ignore_ascii_case(package_name) {
+                                in_target_package = true;
+                            }
+                        }
+                        if in_target_package {
+                            package_xml.push_str(trimmed);
+                            package_xml.push('\n');
+                        }
+                    } else if in_target_package {
+                        package_xml.push_str(trimmed);
+                        package_xml.push('\n');
+
+                        // Check for package end
+                        if trimmed == "</package>" || trimmed.ends_with("</package>") {
+                            // Parse the complete package XML
+                            match self.parse_single_package(&package_xml) {
+                                Ok(Some(pkg_info)) => {
+                                    // Double-check name match
+                                    if pkg_info.name.eq_ignore_ascii_case(package_name) {
+                                        // Check version if specified
+                                        if let Some(ver) = version {
+                                            if pkg_info.version == ver {
+                                                print!("\r                                             \r");
+                                                std::io::Write::flush(&mut std::io::stdout()).ok();
+                                                return Ok(pkg_info);
+                                            }
+                                        } else {
+                                            print!("\r                                             \r");
+                                            std::io::Write::flush(&mut std::io::stdout()).ok();
+                                            return Ok(pkg_info);
+                                        }
+                                    }
+                                }
+                                Ok(None) | Err(_) => {
+                                    // Parse failed, continue searching
+                                    in_target_package = false;
+                                }
+                            }
+                            package_xml.clear();
+                        }
+                    }
+                }
+                Err(e) => return Err(format!("Failed to read package list: {}", e)),
             }
         }
 
-        Ok(package.clone())
+        print!("\r                                             \r");
+        std::io::Write::flush(&mut std::io::stdout()).ok();
+
+        Err(format!("Package {} not found", package_name))
     }
 
     pub async fn download_package(&self, package_info: &YumPackageInfo) -> Result<Vec<u8>, String> {
@@ -184,13 +303,24 @@ impl YumRepositoryClient {
         let mut description = None;
         let mut location = None;
         let mut dependencies = Vec::new();
+        let mut provides = Vec::new();
+        let mut in_provides = false;
         
         for line in package_xml.lines() {
             let line = line.trim();
+
+            // Track if we're inside a provides section
+            if line.contains("<rpm:provides>") {
+                in_provides = true;
+                continue;
+            } else if line.contains("</rpm:provides>") {
+                in_provides = false;
+                continue;
+            }
             
             // Extract package info
             if line.starts_with("<name>") && line.ends_with("</name>") {
-                name = Some(line[6..line.len()-7].to_string());
+                name = Some(line[6..line.len()-7].trim().to_string());
             } else if line.starts_with("<arch>") && line.ends_with("</arch>") {
                 arch = Some(line[6..line.len()-7].to_string());
             } else if line.starts_with("<summary>") && line.ends_with("</summary>") {
@@ -214,20 +344,68 @@ impl YumRepositoryClient {
                         release = Some(line[rel_start+5..rel_start+5+rel_end].to_string());
                     }
                 }
-            } else if line.contains("name=") && line.contains("rpm:entry") {
-                // Extract dependency from attributes: <rpm:entry name="pkgname"/>
+            } else if line.contains("<rpm:entry") && line.contains("name=\"") {
                 if let Some(start) = line.find("name=\"") {
                     if let Some(end) = line[start+6..].find("\"") {
-                        let dep_name = line[start+6..start+6+end].to_string();
-                        if !dep_name.is_empty() 
-                            && !dep_name.contains("rpmlib")
-                            && !dep_name.contains("(")
-                            && !dep_name.contains(")")
-                        {
-                            // Extract just the package name before any operators
-                            let clean_name = dep_name.split_whitespace().next().unwrap_or(&dep_name).to_string();
-                            if !clean_name.is_empty() && !dependencies.contains(&clean_name) {
-                                dependencies.push(clean_name);
+                        let entry_name = &line[start+6..start+6+end];
+                        
+                        if in_provides {
+                            // This is a provides entry - extract the name
+                            let clean_provide = if let Some(paren_start) = entry_name.find('(') {
+                                entry_name[..paren_start].trim()
+                            } else if let Some(op_start) = entry_name.find(|c: char| c == '>' || c == '<' || c == '=' || c == ' ') {
+                                entry_name[..op_start].trim()
+                            } else {
+                                entry_name.trim()
+                            };
+                            
+                            if !clean_provide.is_empty()
+                                && !clean_provide.starts_with("rpmlib(")
+                                && !clean_provide.ends_with(".so")
+                                && !clean_provide.starts_with('/')
+                                && !provides.iter().any(|p| p == clean_provide)
+                            {
+                                provides.push(clean_provide.to_string());
+                            }
+                        } else {
+                            // This is a dependency entry
+                            // Skip rpmlib dependencies and filesystem
+                            if !entry_name.is_empty()
+                                && !entry_name.starts_with("rpmlib(")
+                                && !entry_name.contains("filesystem")
+                                && !entry_name.starts_with("/bin/")
+                                && !entry_name.starts_with("/usr/bin/")
+                                && !entry_name.starts_with("/sbin/")
+                            {
+                                // Extract just the package name, handling version constraints and ABI specs
+                                let clean_name = if let Some(paren_start) = entry_name.find('(') {
+                                    // Handle cases like "python(abi) = 3.14" -> "python"
+                                    entry_name[..paren_start].trim()
+                                } else if let Some(op_start) = entry_name.find(|c: char| c == '>' || c == '<' || c == '=' || c == ' ') {
+                                    // Handle version constraints like "package >= 1.0" -> "package"
+                                    entry_name[..op_start].trim()
+                                } else {
+                                    entry_name.trim()
+                                };
+
+                                // Skip if it's already in dependencies and filter out non-package dependencies
+                                // Use pattern-based filtering to skip virtual packages (no hardcoding)
+                                let name_lower = clean_name.to_lowercase();
+                                let has_separators = name_lower.contains('-') || name_lower.contains('_') || name_lower.contains('.');
+                                let has_numbers = name_lower.chars().any(|c| c.is_ascii_digit());
+                                let is_single_word = !name_lower.contains(' ') && !has_separators;
+                                let is_short = name_lower.len() <= 6;
+                                let is_likely_virtual = is_single_word && is_short && !has_numbers;
+                                
+                                if !clean_name.is_empty()
+                                    && !dependencies.iter().any(|d| d == clean_name)
+                                    && !clean_name.ends_with(".so")  // Skip library sonames
+                                    && !clean_name.ends_with(".so.0")  // Skip versioned library sonames
+                                    && !clean_name.starts_with('/')  // Skip file paths
+                                    && !is_likely_virtual  // Skip virtual packages (pattern-based, no hardcoding)
+                                {
+                                    dependencies.push(clean_name.to_string());
+                                }
                             }
                         }
                     }
@@ -248,6 +426,7 @@ impl YumRepositoryClient {
                 size: 0,
                 url,
                 dependencies,
+                provides,
                 architecture: arch,
                 release,
                 epoch: "0".to_string(),
@@ -260,12 +439,25 @@ impl YumRepositoryClient {
     fn decompress_gzip_bytes(&self, bytes: &[u8]) -> Result<String, String> {
         use flate2::read::GzDecoder;
         use std::io::Read;
-        
+
         let mut decoder = GzDecoder::new(bytes);
         let mut decompressed = String::new();
         decoder.read_to_string(&mut decompressed)
             .map_err(|e| format!("Failed to decompress gzip: {}", e))?;
-        
+
+        Ok(decompressed)
+    }
+
+    fn decompress_zstd_bytes(&self, bytes: &[u8]) -> Result<String, String> {
+        use std::io::Read;
+        use zstd::Decoder;
+
+        let mut decoder = Decoder::new(bytes)
+            .map_err(|e| format!("Failed to create zstd decoder: {}", e))?;
+        let mut decompressed = String::new();
+        decoder.read_to_string(&mut decompressed)
+            .map_err(|e| format!("Failed to decompress zstd: {}", e))?;
+
         Ok(decompressed)
     }
 
@@ -292,6 +484,7 @@ pub struct YumPackageInfo {
     pub size: u64,
     pub url: String,
     pub dependencies: Vec<String>,
+    pub provides: Vec<String>,
     pub architecture: String,
     pub release: String,
     pub epoch: String,

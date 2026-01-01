@@ -19,10 +19,15 @@ pub enum PostAction {
 
 pub fn get_dir() -> Result<PathBuf, String> {
     let path = PathBuf::from("/etc/pax");
-    if !path.exists() && DirBuilder::new().create(&path).is_err() {
-        err!("Failed to create pax directory!")
-    } else {
+    if !path.exists() {
+        // Try to create directory, but don't fail if we don't have permission
+        // This allows read-only operations to work without root
+        let _ = DirBuilder::new().create(&path);
+    }
+    if path.exists() {
         Ok(path)
+    } else {
+        err!("Pax directory does not exist and cannot be created. Please run pax as root first.")
     }
 }
 
@@ -106,6 +111,19 @@ pub fn allow_overwrite_flag() -> Flag {
         false,
         |states, _| {
             states.shove("allow_overwrite", true);
+        },
+    )
+}
+
+pub fn refresh_flag() -> Flag {
+    Flag::new(
+        Some('r'),
+        "refresh",
+        "Force refresh of repository metadata cache (ignores 24h cache).",
+        false,
+        false,
+        |states, _| {
+            states.shove("refresh_cache", true);
         },
     )
 }

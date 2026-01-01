@@ -1,7 +1,7 @@
 use commands::Command;
 use flags::Flag;
 use metadata::get_package_info;
-use settings::{acquire_lock, SettingsYaml};
+use settings::{check_root_required, SettingsYaml};
 use statebox::StateBox;
 use tokio::runtime::Runtime;
 use utils::{PostAction};
@@ -52,10 +52,9 @@ pub fn build(hierarchy: &[String]) -> Command {
 }
 
 fn run(states: &StateBox, args: Option<&[String]>) -> PostAction {
-    match acquire_lock() {
-        Ok(Some(action)) => return action,
-        Err(fault) => return PostAction::Fuck(fault),
-        _ => (),
+    // Info is read-only, doesn't require root
+    if let Some(action) = check_root_required(false) {
+        return action;
     }
 
     let args = match args {
